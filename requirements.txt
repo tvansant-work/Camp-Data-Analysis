@@ -1,4 +1,5 @@
-numpy
 pandas
+numpy
 xlsxwriter
 mlx-lm
+huggingface_hub

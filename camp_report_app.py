@@ -930,7 +930,7 @@ def generate_report(student_path, pre_path, post_path, status_label, root):
         
         try:
             from mlx_lm import load
-            model, tokenizer = load("mlx-community/gemma-4-e4b-it-4bit")
+            model, tokenizer = load("mlx-community/gemma-2-4b-it-4bit")
             email_list, names, surnames = merged_df["Email"].str.lower().tolist(), merged_df["First name"].tolist(), merged_df["Surname"].tolist()
             loc_col, class_col = find_col(post_df, ["location"]), find_col(post_df, ["class"])
             loc_map, class_map = dict(zip(post_df["Email address"], post_df[loc_col])) if loc_col else {}, dict(zip(post_df["Email address"], post_df[class_col])) if class_col else {}
