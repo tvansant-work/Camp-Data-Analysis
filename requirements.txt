@@ -1,0 +1,4 @@
+numpy
+pandas
+xlsxwriter
+mlx-lm
