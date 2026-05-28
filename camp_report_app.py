@@ -2,13 +2,12 @@
 """
 Camp Data Analysis Tool  —  Speed-Optimised Edition
 =====================================================================
-Speed improvements over the Gemma 4 Edition:
-  • Dual-model inference: Qwen2.5-1.5B for fast structured coding,
-    Gemma 4 E4B reserved for narrative generation only (~3-4x faster)
-  • Per-question batch coding with proven reliability (no parse errors)
-  • Thinking mode disabled for narratives (removes wasted CoT tokens)
+Speed improvements over the original Gemma 4 Edition:
   • On-disk coding cache: same cohort data = instant re-run
-  • Tighter dynamic_max_tokens to reduce over-generation
+  • Thinking mode disabled for narratives (removes wasted CoT tokens)
+  • Tighter batch sizes and dynamic_max for more reliable JSON output
+  • Cache versioning: stale/corrupt cache entries auto-invalidated
+Single model (Gemma 4 E4B) used throughout for reliable JSON output.
 Excel output, all 8 dashboards, and analysis quality are identical.
 """
 
@@ -39,18 +38,35 @@ def student_id(email):
 
 def safe_json(text):
     """Robustly extract a JSON array from model output."""
-    for src in [text, re.sub(r"```(?:json)?", "", text)]:
+    # Strip Gemma thinking blocks if present (shouldn't happen with thinking=False,
+    # but older mlx-lm versions sometimes include them anyway)
+    text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
+
+    candidates = [
+        text,
+        re.sub(r"```(?:json)?", "", text).replace("```", ""),  # strip all code fences
+    ]
+    for src in candidates:
         src = src.strip()
         try:
-            return json.loads(src)
+            result = json.loads(src)
+            if isinstance(result, list):
+                return result
         except Exception:
             pass
+        # Find the outermost [...] block
         m = re.search(r'\[.*\]', src, re.DOTALL)
         if m:
             try:
-                return json.loads(m.group())
+                result = json.loads(m.group())
+                if isinstance(result, list):
+                    return result
             except Exception:
                 pass
+
+    # Nothing parsed — print the raw output so it's visible in Terminal
+    preview = text[:300].replace('\n', ' ')
+    print(f"\n⚠️  safe_json could not parse model output. Raw preview:\n  {preview}\n")
     return None
 
 
@@ -62,7 +78,7 @@ def safe_json(text):
 
 CACHE_DIR     = os.path.expanduser("~/Library/Application Support/Camp_Analysis")
 CACHE_FILE    = os.path.join(CACHE_DIR, "coding_cache.pkl")
-CACHE_VERSION = "v3-per-question"   # bump this to invalidate old cache entries
+CACHE_VERSION = "v4-gemma-per-question"  # bump this to invalidate old cache entries
 
 def load_coding_cache():
     try:
@@ -244,7 +260,7 @@ def call_mlx(model, tokenizer, system_msg, user_msg, max_tokens=2500, thinking=F
 # ═══════════════════════════════════════════════════════════════════
 #  PER-QUESTION BATCH CODING
 #  One question at a time — proven reliable with small models.
-#  Speed gain comes from the faster Qwen 1.5B model, not prompt tricks.
+#  Speed comes from caching on re-runs and thinking=False on narratives.
 # ═══════════════════════════════════════════════════════════════════
 
 SYSTEM_CODER = (
@@ -310,9 +326,9 @@ def code_question(coding_model, coding_tokenizer, qc, post_df, email_list,
         root.update()
 
         prompt = build_coding_prompt(qc, batch)
-        # Each student needs ~(fields × 8) tokens of JSON output.
-        # Add 25% headroom; floor at 256 tokens.
-        dynamic_max = max(256, int(len(batch) * len(fields) * 8 * 1.25))
+        # Generous token budget: each student needs ~(fields × 8) tokens of
+        # JSON values plus ~15 tokens of structural overhead, with 20% headroom.
+        dynamic_max = max(512, int(len(batch) * (len(fields) * 8 + 15) * 1.2) + 64)
         raw    = call_mlx(coding_model, coding_tokenizer, SYSTEM_CODER,
                           prompt, max_tokens=dynamic_max, thinking=False)
         parsed = safe_json(raw)
@@ -395,7 +411,7 @@ def build_coded_df(post_df, email_list, names, surnames, classes, locations,
         all_coded, q_resps = cache[fingerprint]
 
     else:
-        # ── Per-question coding (Qwen 1.5B) ──────────────────────
+        # ── Per-question coding (Gemma 4 E4B) ────────────────────
         q_resps   = {}
         all_coded = {i: {} for i in range(len(email_list))}
 
@@ -1043,20 +1059,16 @@ def generate_report(student_path, pre_path, post_path, status_label, root):
         status_label.config(text="Status: Processing quantitative data…", fg="blue"); root.update()
         tab1_df, avg_df, dist_df, breakdown_df, merged_df, metrics_processed = process_quantitative(students, pre_df, post_df)
 
-        # UPDATED STATUS LABEL
+        # Load Gemma 4 E4B — used for both coding and narratives
         status_label.config(
-            text="Status: Loading Qwen 1.5B coding model (~1 GB) — first run downloads once...",
+            text="Status: Loading Gemma 4 E4B model (~2.8 GB) — first run downloads once...",
             fg="#D97706"); root.update()
         year, qual_ok = datetime.now().year, False
-        
+
         try:
             from mlx_lm import load
 
-            # ── Phase 1: Fast coding model (Qwen2.5-1.5B, ~1 GB) ──────────
-            # Used for all structured classification — much faster than Gemma 4
-            # for constrained label-picking tasks with no quality loss.
-            coding_model, coding_tokenizer = load(
-                "mlx-community/Qwen2.5-1.5B-Instruct-4bit")
+            model, tokenizer = load("mlx-community/gemma-4-e4b-it-4bit")
 
             email_list = merged_df["Email"].str.lower().tolist()
             names, surnames = merged_df["First name"].tolist(), merged_df["Surname"].tolist()
@@ -1066,28 +1078,12 @@ def generate_report(student_path, pre_path, post_path, status_label, root):
             locations = [str(loc_map.get(e, "Unknown"))   for e in email_list]
             classes   = [str(class_map.get(e, "Unknown")) for e in email_list]
 
-            # ── Phase 2: Unload coding model, load narrative model ────────
-            # Gemma 4 E4B (~2.8 GB) is only needed for the 8 narrative calls.
-            # Freeing the coding model first keeps peak RAM usage low.
-            status_label.config(
-                text="Status: Coding complete — loading Gemma 4 E4B for narratives (~2.8 GB)...",
-                fg="#D97706"); root.update()
-
-            # Run coding first so we can free the small model before loading the big one
-            # We pass placeholder narrative model args; narratives run after
-            # both models are available inside build_coded_df.
-            # Load narrative model now (coding happens inside build_coded_df)
-            narrative_model, narrative_tokenizer = load(
-                "mlx-community/gemma-4-e4b-it-4bit")
-
             coded_df, narratives = build_coded_df(
                 post_df, email_list, names, surnames, classes, locations,
-                coding_model, coding_tokenizer,
-                narrative_model, narrative_tokenizer,
+                model, tokenizer, model, tokenizer,
                 status_label, root, year)
 
-            # Free both models after use
-            del coding_model, coding_tokenizer, narrative_model, narrative_tokenizer
+            del model, tokenizer
             gc.collect()
 
             long_df          = build_longitudinal_df(coded_df, tab1_df, metrics_processed, year)
@@ -1105,9 +1101,7 @@ def generate_report(student_path, pre_path, post_path, status_label, root):
                 "AI Model Error",
                 f"The AI model could not run. The Excel report will still be generated with quantitative data only.\n\n"
                 f"Error:\n{str(ai_err)}\n\n"
-                f"Tip: Check your internet connection — two models are downloaded on first run:\n"
-                f"  • Qwen2.5-1.5B-Instruct-4bit (~1 GB) for coding\n"
-                f"  • gemma-4-e4b-it-4bit (~2.8 GB) for narratives"
+                f"Tip: Check your internet connection — the model (~2.8 GB) must be downloaded on first run."
             )
             coded_df, long_df = pd.DataFrame([{"Error": err}]), pd.DataFrame([{"Note": err}])
             summary_metadata, narratives = [("SECTION", "AI Error", "", ""), ("DATA", "Error", err, "")], [{"Question": "AI Status", "n": 0, "Summary": err}]
@@ -1143,7 +1137,7 @@ def setup_gui():
         tk.Button(f, text="Browse", width=10, command=lambda: pick(key, e)).pack(side="right")
 
     tk.Label(root, text="Camp Report Generator", font=("Arial", 17, "bold"), pady=12).pack()
-    tk.Label(root, text="Qwen 1.5B Coder + Gemma 4 E4B Narratives | 8 Dashboards | Triangulation", font=("Arial", 9), fg="#555555").pack()
+    tk.Label(root, text="Gemma 4 E4B | Cache + Fast Settings | 8 Dashboards | Triangulation", font=("Arial", 9), fg="#555555").pack()
     tk.Frame(root, height=1, bg="#CCCCCC").pack(fill="x", padx=25, pady=8)
     row("1.  Student List CSV", "student"); row("2.  Pre-Camp Survey CSV", "pre"); row("3.  Post-Camp Survey CSV", "post")
     tk.Frame(root, height=1, bg="#CCCCCC").pack(fill="x", padx=25, pady=10)
