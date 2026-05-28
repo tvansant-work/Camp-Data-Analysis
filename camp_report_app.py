@@ -932,8 +932,8 @@ def generate_report(student_path, pre_path, post_path, status_label, root):
         try:
             from mlx_lm import load
             
-            # FIXED MODEL PATH: Using the PLE-patched version built for Mac
-            model, tokenizer = load("FakeRockert543/gemma-4-e4b-it-MLX-4bit")
+            # Gemma 4 E4B — official MLX-community quantised build
+            model, tokenizer = load("mlx-community/gemma-4-e4b-it-4bit")
             
             email_list, names, surnames = merged_df["Email"].str.lower().tolist(), merged_df["First name"].tolist(), merged_df["Surname"].tolist()
             loc_col, class_col = find_col(post_df, ["location"]), find_col(post_df, ["class"])
@@ -949,14 +949,25 @@ def generate_report(student_path, pre_path, post_path, status_label, root):
             qual_ok = True
 
         except Exception as ai_err:
+            err_detail = traceback.format_exc()
             err = f"AI error: {ai_err}"
+            print(f"\n{'='*60}\nAI ERROR DETAIL:\n{err_detail}\n{'='*60}\n")
             status_label.config(text="Status: AI failed — quantitative only", fg="red"); root.update()
+            messagebox.showwarning(
+                "AI Model Error",
+                f"The AI model could not run. The Excel report will still be generated with quantitative data only.\n\n"
+                f"Error:\n{str(ai_err)}\n\n"
+                f"Tip: Check your internet connection — the model (~2.8 GB) must be downloaded on first run."
+            )
             coded_df, long_df = pd.DataFrame([{"Error": err}]), pd.DataFrame([{"Note": err}])
             summary_metadata, narratives = [("SECTION", "AI Error", "", ""), ("DATA", "Error", err, "")], [{"Question": "AI Status", "n": 0, "Summary": err}]
             mm_tables, qual_charts = [], {}
 
         status_label.config(text="Status: Writing Excel report…", fg="blue"); root.update()
-        output = "Camp_Analysis_Report.xlsx"
+        docs_dir = os.path.expanduser("~/Documents")
+        os.makedirs(docs_dir, exist_ok=True)
+        timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M")
+        output = os.path.join(docs_dir, f"Camp_Analysis_Report_{timestamp}.xlsx")
         write_excel(output, tab1_df, avg_df, dist_df, breakdown_df, coded_df, summary_metadata, long_df, narratives, metrics_processed, mm_tables, qual_charts)
 
         status_label.config(text="Status: Complete ✓", fg="#006100")
