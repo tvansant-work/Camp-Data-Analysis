@@ -20,9 +20,9 @@ cat << EOF > launcher.sh
 #!/bin/bash
 cd "$BASE_DIR"
 
-# A. Update Code & Requirements from GitHub
-curl -s -o camp_report_app.py https://raw.githubusercontent.com/$GITHUB_USER/$GITHUB_REPO/main/camp_report_app.py
-curl -s -o requirements.txt https://raw.githubusercontent.com/$GITHUB_USER/$GITHUB_REPO/main/requirements.txt
+# A. Update Code & Requirements from GitHub (Cache-Busting applied)
+curl -s -o camp_report_app.py "https://raw.githubusercontent.com/$GITHUB_USER/$GITHUB_REPO/main/camp_report_app.py?t=\$(date +%s)"
+curl -s -o requirements.txt "https://raw.githubusercontent.com/$GITHUB_USER/$GITHUB_REPO/main/requirements.txt?t=\$(date +%s)"
 
 # B. Sync Dependencies
 source venv/bin/activate
@@ -30,7 +30,7 @@ pip install -r requirements.txt --quiet
 
 # C. Update Icon if missing
 if [ ! -f "app_icon.png" ]; then
-    curl -s -o app_icon.png https://raw.githubusercontent.com/$GITHUB_USER/$GITHUB_REPO/main/app_icon.png
+    curl -s -o app_icon.png "https://raw.githubusercontent.com/$GITHUB_USER/$GITHUB_REPO/main/app_icon.png"
 fi
 
 # D. RUN THE APP
@@ -46,7 +46,7 @@ chmod +x "$SHORTCUT"
 
 echo "Step 3/3: Applying Custom Icon..."
 # Download icon for the setter
-curl -s -o app_icon.png https://raw.githubusercontent.com/$GITHUB_USER/$GITHUB_REPO/main/app_icon.png
+curl -s -o app_icon.png "https://raw.githubusercontent.com/$GITHUB_USER/$GITHUB_REPO/main/app_icon.png"
 
 # Install Cocoa tool silently into the virtual environment to fix the icon bug
 ./venv/bin/pip install pyobjc-framework-Cocoa --quiet
