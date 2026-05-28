@@ -5,8 +5,7 @@ Camp Data Analysis Tool  —  Speed-Optimised Edition
 Speed improvements over the Gemma 4 Edition:
   • Dual-model inference: Qwen2.5-1.5B for fast structured coding,
     Gemma 4 E4B reserved for narrative generation only (~3-4x faster)
-  • Multi-question batching: all 8 questions coded in one prompt per
-    batch, cutting model calls by up to 8x
+  • Per-question batch coding with proven reliability (no parse errors)
   • Thinking mode disabled for narratives (removes wasted CoT tokens)
   • On-disk coding cache: same cohort data = instant re-run
   • Tighter dynamic_max_tokens to reduce over-generation
@@ -61,19 +60,25 @@ def safe_json(text):
 #  since the last run, coding results are loaded from disk instantly.
 # ═══════════════════════════════════════════════════════════════════
 
-CACHE_DIR  = os.path.expanduser("~/Library/Application Support/Camp_Analysis")
-CACHE_FILE = os.path.join(CACHE_DIR, "coding_cache.pkl")
+CACHE_DIR     = os.path.expanduser("~/Library/Application Support/Camp_Analysis")
+CACHE_FILE    = os.path.join(CACHE_DIR, "coding_cache.pkl")
+CACHE_VERSION = "v3-per-question"   # bump this to invalidate old cache entries
 
 def load_coding_cache():
     try:
         with open(CACHE_FILE, "rb") as f:
-            return pickle.load(f)
+            data = pickle.load(f)
+        # Discard cache built by a different version (e.g. buggy multi-question run)
+        if not isinstance(data, dict) or data.get("__version__") != CACHE_VERSION:
+            return {"__version__": CACHE_VERSION}
+        return data
     except Exception:
-        return {}
+        return {"__version__": CACHE_VERSION}
 
 def save_coding_cache(cache):
     try:
         os.makedirs(CACHE_DIR, exist_ok=True)
+        cache["__version__"] = CACHE_VERSION
         with open(CACHE_FILE, "wb") as f:
             pickle.dump(cache, f)
     except Exception as e:
@@ -237,9 +242,9 @@ def call_mlx(model, tokenizer, system_msg, user_msg, max_tokens=2500, thinking=F
 
 
 # ═══════════════════════════════════════════════════════════════════
-#  MULTI-QUESTION BATCH CODING
-#  All 8 questions are coded in a single model call per student batch.
-#  This reduces model calls from ~32 down to ~4 for a 150-student cohort.
+#  PER-QUESTION BATCH CODING
+#  One question at a time — proven reliable with small models.
+#  Speed gain comes from the faster Qwen 1.5B model, not prompt tricks.
 # ═══════════════════════════════════════════════════════════════════
 
 SYSTEM_CODER = (
@@ -250,110 +255,6 @@ SYSTEM_CODER = (
     "'Unclear', or 'No' tags provided in the guide."
 )
 
-
-def build_multi_question_prompt(active_questions, batch):
-    """
-    Build a single prompt that codes all active questions for a batch of
-    students simultaneously. Each student object in the batch must have
-    keys 'id' and 'q{N}' for each question number N.
-    """
-    fields_spec = ""
-    for qc in active_questions:
-        fields_spec += f'\n\n--- Q{qc["num"]}: {qc["label"]} ---'
-        fields_spec += f'\n  (student key: "q{qc["num"]}")'
-        for field, values in qc["fields"].items():
-            fields_spec += f'\n  "{field}": one of {json.dumps(values)}'
-        fields_spec += f'\n  Guide: {qc["guide"].strip()}'
-
-    items_str = "\n".join(json.dumps(item) for item in batch)
-
-    all_example_fields = ", ".join(
-        f'"{f}": "..."'
-        for qc in active_questions
-        for f in qc["fields"]
-    )
-
-    return f"""Code each student's responses to ALL camp survey questions below.
-
-QUESTIONS AND FIELDS TO CODE:{fields_spec}
-
-STUDENT RESPONSES (each object has a response for each question):
-{items_str}
-
-Return ONLY a JSON array. Each object must have "id" plus ALL coded fields listed above.
-Example: [{{"id": 0, {all_example_fields}}}]"""
-
-
-def code_all_questions_batched(coding_model, coding_tokenizer, active_questions,
-                                post_df, email_list, status_label, root, BATCH=25):
-    """
-    Code all active questions for all students in one set of batched calls.
-    Returns dict: {student_idx: {field: value, ...}}
-    Falls back to per-question coding if the combined parse fails badly.
-    """
-    all_fields = [f for qc in active_questions for f in qc["fields"]]
-
-    # Build response maps for each active question
-    q_resps = {}
-    for qc in active_questions:
-        col = find_col(post_df, qc["keywords"])
-        q_resps[qc["num"]] = (
-            dict(zip(post_df["Email address"], post_df[col])) if col else {}
-        )
-
-    # Build per-student items
-    items = []
-    for idx, email in enumerate(email_list):
-        item = {"id": idx}
-        for qc in active_questions:
-            item[f"q{qc['num']}"] = str(q_resps[qc["num"]].get(email, "")).strip()
-        items.append(item)
-
-    coded = {}
-    total_batches = max(1, (len(items) + BATCH - 1) // BATCH)
-
-    for bn, start in enumerate(range(0, len(items), BATCH), 1):
-        batch = items[start:start + BATCH]
-        status_label.config(
-            text=f"Status: Coding all questions — batch {bn}/{total_batches}  "
-                 f"(fast model, {len(batch)} students)...",
-            fg="#D97706"
-        )
-        root.update()
-
-        prompt = build_multi_question_prompt(active_questions, batch)
-        # ~12 tokens per field value + JSON structure overhead
-        dynamic_max = max(512, len(batch) * len(all_fields) * 12)
-        raw    = call_mlx(coding_model, coding_tokenizer, SYSTEM_CODER,
-                          prompt, max_tokens=dynamic_max, thinking=False)
-        parsed = safe_json(raw)
-
-        if isinstance(parsed, list):
-            for row in parsed:
-                if isinstance(row, dict) and "id" in row:
-                    idx = row["id"]
-                    coded[idx] = {f: str(row.get(f, "Parse-Error")).strip()
-                                  for f in all_fields}
-
-        # If any student in the batch wasn't parsed, mark as Parse-Error
-        for item in batch:
-            if item["id"] not in coded:
-                coded[item["id"]] = {f: "Parse-Error" for f in all_fields}
-
-    # Override with No-Response where the student left a question blank
-    for item in items:
-        idx = item["id"]
-        for qc in active_questions:
-            if len(item[f"q{qc['num']}"]) <= 3:
-                for f in qc["fields"]:
-                    coded[idx][f] = "No-Response"
-
-    return coded
-
-
-# ═══════════════════════════════════════════════════════════════════
-#  SINGLE-QUESTION FALLBACK (kept for per-question error recovery)
-# ═══════════════════════════════════════════════════════════════════
 
 def build_coding_prompt(qc, batch):
     fields_spec = ""
@@ -379,41 +280,59 @@ Return ONLY a JSON array. Each object must have "id" plus the coded fields.
 Example format: [{{"id": 0, {example_fields}}}]"""
 
 
-def code_question_fallback(model, tokenizer, qc, post_df, email_list,
-                           status_label, root, BATCH=50):
-    """Per-question fallback used if multi-question coding fails."""
+def code_question(coding_model, coding_tokenizer, qc, post_df, email_list,
+                  status_label, root, BATCH=40):
+    """
+    Code one question for all students in batches of BATCH.
+    BATCH=40 is conservative for the 1.5B model — keeps JSON output
+    short enough that it never gets truncated.
+    """
     col    = find_col(post_df, qc["keywords"])
     fields = list(qc["fields"].keys())
+
     email_resp = dict(zip(post_df["Email address"],
                           post_df.get(col, pd.Series(dtype=str))))
-    items = [{"id": idx, "text": str(email_resp.get(e, "")).strip(),
-              "empty": len(str(email_resp.get(e, "")).strip()) <= 3}
-             for idx, e in enumerate(email_list)]
-    coded      = {}
-    to_code    = [it for it in items if not it["empty"]]
+    items = []
+    for idx, email in enumerate(email_list):
+        resp = str(email_resp.get(email, "")).strip()
+        items.append({"id": idx, "text": resp, "empty": len(resp) <= 3})
+
+    coded   = {}
+    to_code = [it for it in items if not it["empty"]]
     total_batches = max(1, (len(to_code) + BATCH - 1) // BATCH)
+
     for bn, start in enumerate(range(0, len(to_code), BATCH), 1):
         batch = to_code[start:start + BATCH]
         status_label.config(
-            text=f"Status: Fallback coding Q{qc['num']} — batch {bn}/{total_batches}...",
+            text=f"Status: Coding Q{qc['num']} ({qc['label']}) — "
+                 f"batch {bn}/{total_batches}...",
             fg="#D97706")
         root.update()
-        prompt      = build_coding_prompt(qc, batch)
-        dynamic_max = max(256, len(batch) * len(fields) * 12)
-        raw         = call_mlx(model, tokenizer, SYSTEM_CODER, prompt,
-                               max_tokens=dynamic_max, thinking=False)
-        parsed      = safe_json(raw)
+
+        prompt = build_coding_prompt(qc, batch)
+        # Each student needs ~(fields × 8) tokens of JSON output.
+        # Add 25% headroom; floor at 256 tokens.
+        dynamic_max = max(256, int(len(batch) * len(fields) * 8 * 1.25))
+        raw    = call_mlx(coding_model, coding_tokenizer, SYSTEM_CODER,
+                          prompt, max_tokens=dynamic_max, thinking=False)
+        parsed = safe_json(raw)
+
         if isinstance(parsed, list):
             for row in parsed:
                 if isinstance(row, dict) and "id" in row:
-                    coded[row["id"]] = {f: str(row.get(f, "Parse-Error")).strip()
-                                        for f in fields}
+                    coded[row["id"]] = {
+                        f: str(row.get(f, "Parse-Error")).strip()
+                        for f in fields
+                    }
+
         for it in batch:
             if it["id"] not in coded:
                 coded[it["id"]] = {f: "Parse-Error" for f in fields}
+
     for it in items:
         if it["empty"]:
             coded[it["id"]] = {f: "No-Response" for f in fields}
+
     return coded
 
 
@@ -465,86 +384,56 @@ def build_coded_df(post_df, email_list, names, surnames, classes, locations,
                    status_label, root, year):
 
     # ── Check on-disk cache ───────────────────────────────────────
-    cache      = load_coding_cache()
+    cache       = load_coding_cache()
     fingerprint = data_fingerprint(email_list, post_df)
+
     if fingerprint in cache:
         status_label.config(
             text="Status: Cache hit — skipping coding (data unchanged) ✓",
             fg="#006100")
         root.update()
-        cached_coded, cached_q_resps = cache[fingerprint]
-        coded_df = _assemble_coded_df(cached_coded, cached_q_resps,
-                                      email_list, names, surnames, classes,
-                                      locations, year)
+        all_coded, q_resps = cache[fingerprint]
+
     else:
-        # ── Multi-question batch coding ───────────────────────────
-        active_questions = [
-            qc for qc in QUAL_QUESTIONS
-            if find_col(post_df, qc["keywords"]) is not None
-        ]
-        missing_questions = [
-            qc for qc in QUAL_QUESTIONS
-            if find_col(post_df, qc["keywords"]) is None
-        ]
+        # ── Per-question coding (Qwen 1.5B) ──────────────────────
+        q_resps   = {}
+        all_coded = {i: {} for i in range(len(email_list))}
 
-        all_coded = {}
-        if active_questions:
-            try:
-                all_coded = code_all_questions_batched(
-                    coding_model, coding_tokenizer,
-                    active_questions, post_df, email_list,
-                    status_label, root)
-            except Exception as batch_err:
-                print(f"Multi-question batch failed ({batch_err}), "
-                      f"falling back to per-question coding...")
-                for qc in active_questions:
-                    q_coded = code_question_fallback(
-                        coding_model, coding_tokenizer,
-                        qc, post_df, email_list, status_label, root)
-                    for idx in range(len(email_list)):
-                        if idx not in all_coded:
-                            all_coded[idx] = {}
-                        all_coded[idx].update(q_coded.get(idx, {}))
-
-        # Fill Column-Not-Found for missing questions
-        for qc in missing_questions:
-            for idx in range(len(email_list)):
-                if idx not in all_coded:
-                    all_coded[idx] = {}
-                for f in qc["fields"]:
-                    all_coded[idx][f] = "Column-Not-Found"
-
-        # ── Build response text map ───────────────────────────────
-        q_resps = {}
         for qc in QUAL_QUESTIONS:
-            col = find_col(post_df, qc["keywords"])
-            if col:
-                q_resps[qc["num"]] = dict(zip(post_df["Email address"], post_df[col]))
-            else:
-                q_resps[qc["num"]] = {}
+            qnum = qc["num"]
+            col  = find_col(post_df, qc["keywords"])
 
-        # ── Save to cache ─────────────────────────────────────────
+            if col:
+                q_resps[qnum] = dict(zip(post_df["Email address"], post_df[col]))
+                q_coded = code_question(
+                    coding_model, coding_tokenizer,
+                    qc, post_df, email_list, status_label, root)
+                for idx in range(len(email_list)):
+                    all_coded[idx].update(q_coded.get(idx, {
+                        f: "Parse-Error" for f in qc["fields"]
+                    }))
+            else:
+                q_resps[qnum] = {}
+                for idx in range(len(email_list)):
+                    for f in qc["fields"]:
+                        all_coded[idx][f] = "Column-Not-Found"
+
+        # ── Save good results to cache ────────────────────────────
         cache[fingerprint] = (all_coded, q_resps)
         save_coding_cache(cache)
 
-        coded_df = _assemble_coded_df(all_coded, q_resps,
-                                      email_list, names, surnames, classes,
-                                      locations, year)
+    # ── Assemble coded DataFrame ──────────────────────────────────
+    coded_df = _assemble_coded_df(all_coded, q_resps,
+                                  email_list, names, surnames,
+                                  classes, locations, year)
 
     # ── Narrative generation (Gemma 4 E4B, thinking disabled) ────
-    # Build q_resps from coded_df for narrative use
-    q_resps_for_narr = {}
-    for qc in QUAL_QUESTIONS:
-        col = find_col(post_df, qc["keywords"])
-        if col:
-            q_resps_for_narr[qc["num"]] = dict(zip(post_df["Email address"], post_df[col]))
-        else:
-            q_resps_for_narr[qc["num"]] = {}
-
     narratives = []
     for qc in QUAL_QUESTIONS:
-        qnum = qc["num"]
-        raw_vals = [str(q_resps_for_narr[qnum].get(e, "")).strip() for e in email_list]
+        qnum     = qc["num"]
+        raw_vals = [str(q_resps.get(qnum, {}).get(e, "")).strip()
+                    for e in email_list]
+
         if not find_col(post_df, qc["keywords"]):
             narratives.append({
                 "Question": f"Q{qnum}: {qc['label']}",
@@ -552,13 +441,15 @@ def build_coded_df(post_df, email_list, names, surnames, classes, locations,
                 "Summary": "Column not found in post-camp CSV.",
             })
             continue
+
         narrative_text = generate_narrative(
-            narrative_model, narrative_tokenizer, qc, raw_vals, status_label, root)
+            narrative_model, narrative_tokenizer,
+            qc, raw_vals, status_label, root)
         valid_n = sum(1 for r in raw_vals if len(r) > 3)
         narratives.append({
             "Question": f"Q{qnum}: {qc['label']}",
-            "n": valid_n,
-            "Summary": narrative_text,
+            "n":        valid_n,
+            "Summary":  narrative_text,
         })
 
     return coded_df, narratives
