@@ -20,6 +20,10 @@ cat << EOF > launcher.sh
 #!/bin/bash
 cd "$BASE_DIR"
 
+echo "=================================================="
+echo " 🔄 Checking for updates from GitHub..."
+echo "=================================================="
+
 # A. Update Code & Requirements from GitHub (Cache-Busting applied)
 curl -s -o camp_report_app.py "https://raw.githubusercontent.com/$GITHUB_USER/$GITHUB_REPO/main/camp_report_app.py?t=\$(date +%s)"
 curl -s -o requirements.txt "https://raw.githubusercontent.com/$GITHUB_USER/$GITHUB_REPO/main/requirements.txt?t=\$(date +%s)"
@@ -27,6 +31,9 @@ curl -s -o requirements.txt "https://raw.githubusercontent.com/$GITHUB_USER/$GIT
 # B. Sync Dependencies
 source venv/bin/activate
 pip install -r requirements.txt --quiet
+
+echo " ✅ App is up to date. Launching Camp Analysis..."
+echo "=================================================="
 
 # C. Update Icon if missing
 if [ ! -f "app_icon.png" ]; then

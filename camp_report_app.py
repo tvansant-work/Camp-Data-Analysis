@@ -3,7 +3,7 @@
 Camp Data Analysis Tool  —  Gemma 4 Edition
 =====================================================================
 Features:
-  • Gemma 4 E4B Model Integration (Fast, Lightweight, Smart)
+  • Gemma 4 E4B Model Integration (Fast, Lightweight, Smart - PLE patched)
   • Restored robust AI prompts (Eliminates Parse-Errors)
   • Restored original Quant Charts (Visual Summary)
   • Restored premium Excel formatting (Column widths, text wrapping)
@@ -925,12 +925,16 @@ def generate_report(student_path, pre_path, post_path, status_label, root):
         status_label.config(text="Status: Processing quantitative data…", fg="blue"); root.update()
         tab1_df, avg_df, dist_df, breakdown_df, merged_df, metrics_processed = process_quantitative(students, pre_df, post_df)
 
-        status_label.config(text="Status: Loading AI model (~2.8 GB) - First run takes a few mins...", fg="#D97706"); root.update()
+        # UPDATED STATUS LABEL
+        status_label.config(text="Status: Loading Gemma 4 E4B Model (~2.8 GB) - First run takes a few mins...", fg="#D97706"); root.update()
         year, qual_ok = datetime.now().year, False
         
         try:
             from mlx_lm import load
-            model, tokenizer = load("mlx-community/gemma-2-4b-it-4bit")
+            
+            # FIXED MODEL PATH: Using the PLE-patched version built for Mac
+            model, tokenizer = load("FakeRockert543/gemma-4-e4b-it-MLX-4bit")
+            
             email_list, names, surnames = merged_df["Email"].str.lower().tolist(), merged_df["First name"].tolist(), merged_df["Surname"].tolist()
             loc_col, class_col = find_col(post_df, ["location"]), find_col(post_df, ["class"])
             loc_map, class_map = dict(zip(post_df["Email address"], post_df[loc_col])) if loc_col else {}, dict(zip(post_df["Email address"], post_df[class_col])) if class_col else {}
