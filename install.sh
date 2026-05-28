@@ -16,7 +16,6 @@ if [ ! -d "venv" ]; then
 fi
 
 # 2. Create the "Launch & Update" Wrapper
-# This script runs EVERY TIME they click the icon
 cat << EOF > launcher.sh
 #!/bin/bash
 cd "$BASE_DIR"
@@ -25,7 +24,7 @@ cd "$BASE_DIR"
 curl -s -o camp_report_app.py https://raw.githubusercontent.com/$GITHUB_USER/$GITHUB_REPO/main/camp_report_app.py
 curl -s -o requirements.txt https://raw.githubusercontent.com/$GITHUB_USER/$GITHUB_REPO/main/requirements.txt
 
-# B. Sync Dependencies (Only installs if requirements.txt changed)
+# B. Sync Dependencies
 source venv/bin/activate
 pip install -r requirements.txt --quiet
 
@@ -49,8 +48,11 @@ echo "Step 3/3: Applying Custom Icon..."
 # Download icon for the setter
 curl -s -o app_icon.png https://raw.githubusercontent.com/$GITHUB_USER/$GITHUB_REPO/main/app_icon.png
 
-# Advanced Python-Cocoa bridge to set the icon programmatically
-/usr/bin/python3 - << 'PYEOF'
+# Install Cocoa tool silently into the virtual environment to fix the icon bug
+./venv/bin/pip install pyobjc-framework-Cocoa --quiet
+
+# Use the virtual environment's Python to set the icon
+./venv/bin/python3 - << 'PYEOF'
 import Cocoa
 import os
 import sys
