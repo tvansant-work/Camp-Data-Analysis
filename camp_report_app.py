@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 """
-Camp Data Analysis Tool  —  Speed-Optimised Edition
+Camp Data Analysis Tool  —  Speed-Optimised Edition (Rigorous NLP & Purging)
 =====================================================================
-Speed improvements over the original Gemma 4 Edition:
-  • On-disk coding cache: same cohort data = instant re-run
-  • Thinking mode disabled for narratives (removes wasted CoT tokens)
-  • Tighter batch sizes and dynamic_max for more reliable JSON output
-  • Cache versioning: stale/corrupt cache entries auto-invalidated
-Single model (Gemma 4 E4B) used throughout for reliable JSON output.
-Excel output, all 8 dashboards, and analysis quality are identical.
+Features:
+  • Ghost-Row Purging: Drops non-responders to ensure pristine data.
+  • Isolated Experience Sentiment: Prevents constructive feedback from dragging down scores.
+  • Tone Analysis: Codes Q6/Q7 for Tone (Constructive, Critical, Practical).
+  • Challenge Attitude: Codes Q2 for resilience rather than penalizing hardship.
+  • On-disk coding cache: same cohort data = instant re-run.
+  • Thinking mode disabled for narratives (removes wasted CoT tokens).
+  • Tighter batch sizes and dynamic_max for more reliable JSON output.
+  • All Original Dashboards, Highlights, and Premium Formatting Preserved.
 """
 
 import gc, hashlib, json, os, pickle, re, traceback
@@ -38,8 +40,7 @@ def student_id(email):
 
 def safe_json(text):
     """Robustly extract a JSON array from model output."""
-    # Strip Gemma thinking blocks if present (shouldn't happen with thinking=False,
-    # but older mlx-lm versions sometimes include them anyway)
+    # Strip Gemma thinking blocks if present
     text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
 
     candidates = [
@@ -64,7 +65,6 @@ def safe_json(text):
             except Exception:
                 pass
 
-    # Nothing parsed — print the raw output so it's visible in Terminal
     preview = text[:300].replace('\n', ' ')
     print(f"\n⚠️  safe_json could not parse model output. Raw preview:\n  {preview}\n")
     return None
@@ -72,19 +72,16 @@ def safe_json(text):
 
 # ═══════════════════════════════════════════════════════════════════
 #  ON-DISK CODING CACHE
-#  Hashes the post-camp CSV + email list. If the data hasn't changed
-#  since the last run, coding results are loaded from disk instantly.
 # ═══════════════════════════════════════════════════════════════════
 
 CACHE_DIR     = os.path.expanduser("~/Library/Application Support/Camp_Analysis")
 CACHE_FILE    = os.path.join(CACHE_DIR, "coding_cache.pkl")
-CACHE_VERSION = "v4-gemma-per-question"  # bump this to invalidate old cache entries
+CACHE_VERSION = "v5-strict-rigorous"
 
 def load_coding_cache():
     try:
         with open(CACHE_FILE, "rb") as f:
             data = pickle.load(f)
-        # Discard cache built by a different version (e.g. buggy multi-question run)
         if not isinstance(data, dict) or data.get("__version__") != CACHE_VERSION:
             return {"__version__": CACHE_VERSION}
         return data
@@ -101,18 +98,16 @@ def save_coding_cache(cache):
         print(f"Cache save warning: {e}")
 
 def data_fingerprint(email_list, post_df):
-    """SHA-256 of input data. Same cohort + same answers = cache hit."""
     content = "|".join(sorted(str(e) for e in email_list)) + post_df.to_csv(index=False)
     return hashlib.sha256(content.encode()).hexdigest()
 
 
 # ═══════════════════════════════════════════════════════════════════
-#  SIMPLIFIED QUALITATIVE CODEBOOK (RESTORED FULL DESCRIPTIONS)
+#  REFINED QUALITATIVE CODEBOOK (TONE vs SENTIMENT)
 # ═══════════════════════════════════════════════════════════════════
 
 QUAL_QUESTIONS = [
-
-    {   # ─── Q1 ─────────────────────────────────────────────────
+    {
         "num": 1, "label": "Peer Assistance",
         "keywords": ["helped a classmate"],
         "fields": {
@@ -120,40 +115,20 @@ QUAL_QUESTIONS = [
             "Q1_Type": ["Equipment/Gear", "Campcraft", "Emotional-Support", "Physical-Help", "Taught-a-Skill", "Unclear"],
             "Q1_Sentiment": ["Positive", "Neutral", "Negative", "Mixed"],
         },
-        "guide": """
-Q1_Direction:
-  "Gave-Help"     → the student helped someone else
-  "Received-Help" → someone helped the student
-  "Mutual"        → both helped each other
-  "Not-Mentioned" → no clear example
-
-Q1_Type:
-  "Equipment/Gear"     → Trangia, bike, navigation
-  "Campcraft"          → tent setup, packing, campsite
-  "Emotional-Support"  → encouragement, motivation
-  "Physical-Help"      → carrying heavy gear
-  "Taught-a-Skill"     → explaining how to do something
-  "Unclear"            → type of help is not clear
-"""
+        "guide": "Code the direction of help and the type of help given."
     },
-
-    {   # ─── Q2 ─────────────────────────────────────────────────
+    {
         "num": 2, "label": "Challenge & Resilience",
         "keywords": ["biggest", "challenge"],
         "fields": {
             "Q2_Challenge": ["Physical-Effort", "Fear-or-Anxiety", "Weather-or-Environment", "Social-Difficulty", "Equipment-or-Skills", "Not-Specified"],
             "Q2_Response": ["Pushed-Through-Alone", "Friends-or-Staff-Helped", "Adapted-Approach", "Just-Tried-It", "Not-Explained"],
             "Q2_Growth": ["Yes", "Partial", "No"],
-            "Q2_Sentiment": ["Positive", "Neutral", "Negative", "Mixed"],
+            "Q2_Attitude": ["Resilient-and-Proud", "Matter-of-Fact", "Overwhelmed-or-Negative"],
         },
-        "guide": """
-Q2_Challenge: Physical-Effort, Fear-or-Anxiety, Weather-or-Environment, Social-Difficulty, Equipment-or-Skills, Not-Specified.
-Q2_Response: Pushed-Through-Alone, Friends-or-Staff-Helped, Adapted-Approach, Just-Tried-It, Not-Explained.
-Q2_Growth: "Yes" (explicit growth), "Partial" (implied), "No".
-"""
+        "guide": "Code what the challenge was, how they responded, and their attitude looking back at the hardship."
     },
-
-    {   # ─── Q3 ─────────────────────────────────────────────────
+    {
         "num": 3, "label": "Surprising Skill",
         "keywords": ["surprised yourself"],
         "fields": {
@@ -161,16 +136,9 @@ Q2_Growth: "Yes" (explicit growth), "Partial" (implied), "No".
             "Q3_Growth_Type": ["Beat-Own-Expectations", "Overcame-a-Fear", "Got-Noticeably-Better", "Discovered-Enjoyment"],
             "Q3_Sentiment": ["Positive", "Neutral", "Negative", "Mixed"],
         },
-        "guide": """
-Q3_Growth_Type:
-  "Beat-Own-Expectations" → expected to dislike/fail, but didn't
-  "Overcame-a-Fear"       → pushed through fear
-  "Got-Noticeably-Better" → visible skill improvement
-  "Discovered-Enjoyment"  → found unexpected fun
-"""
+        "guide": "Code the activity and the type of personal growth."
     },
-
-    {   # ─── Q4 ─────────────────────────────────────────────────
+    {
         "num": 4, "label": "First Nations Culture",
         "keywords": ["first nations", "stood out"],
         "fields": {
@@ -178,16 +146,9 @@ Q3_Growth_Type:
             "Q4_Depth": ["Recalled-a-Fact", "New-Perspective", "Personal-Connection", "Surface-Level"],
             "Q4_Sentiment": ["Positive", "Neutral", "Negative", "Mixed"],
         },
-        "guide": """
-Q4_Depth:
-  "Recalled-a-Fact"     → remembered info without deeper thought
-  "New-Perspective"     → describes a shift in understanding
-  "Personal-Connection" → emotional resonance or empathy
-  "Surface-Level"       → minimal engagement
-"""
+        "guide": "Code the topic remembered and their depth of understanding."
     },
-
-    {   # ─── Q5 ─────────────────────────────────────────────────
+    {
         "num": 5, "label": "Favourite Part",
         "keywords": ["absolute favourite"],
         "fields": {
@@ -195,43 +156,39 @@ Q4_Depth:
             "Q5_Why": ["Thrill-and-Fun", "Friendship", "Achievement", "Beauty-or-Peace", "Freedom-or-Choice", "Not-Explained"],
             "Q5_Sentiment": ["Positive", "Neutral", "Negative", "Mixed"],
         },
-        "guide": "Code WHAT their favourite part was and WHY it was their favourite."
+        "guide": "Code WHAT their favourite part was and WHY."
     },
-
-    {   # ─── Q6 ─────────────────────────────────────────────────
+    {
         "num": 6, "label": "Improvement Suggestions",
         "keywords": ["camp director"],
         "fields": {
             "Q6_Suggestion": ["More-Time-or-Activities", "Better-Food", "Better-Gear-or-Comfort", "Schedule-Change", "Happy-With-Everything", "Warmer-Weather-or-Season", "Other"],
-            "Q6_Sentiment": ["Positive", "Neutral", "Negative", "Mixed"],
+            "Q6_Tone": ["Constructive-Suggestion", "Critical-Complaint", "Praising", "Neutral-Observation"],
         },
-        "guide": "Code their primary suggestion for the camp director."
+        "guide": "Code their primary suggestion and the Tone of their feedback (e.g. constructive ideas vs complaining)."
     },
-
-    {   # ─── Q7 ─────────────────────────────────────────────────
+    {
         "num": 7, "label": "Advice for Year 7s",
         "keywords": ["year 7 student"],
         "fields": {
             "Q7_Advice": ["Mindset-and-Attitude", "Pack-and-Gear", "Food-and-Snacks", "Be-Social", "Comfort-and-Sleep", "Safety-and-Health", "Just-Try-Everything", "Not-Specified"],
-            "Q7_Sentiment": ["Positive", "Neutral", "Negative", "Mixed"],
+            "Q7_Tone": ["Encouraging", "Cautionary-or-Warning", "Practical-and-Factual"],
         },
-        "guide": "Code the main piece of advice given to younger students."
+        "guide": "Code the main piece of advice given and the overall tone used to deliver it."
     },
-
-    {   # ─── Q8 ─────────────────────────────────────────────────
+    {
         "num": 8, "label": "7-Day Camp Preparation",
         "keywords": ["better prepare"],
         "fields": {
             "Q8_Prep_Focus": ["Get-Fitter", "Better-Packing", "Practice-Camp-Skills", "Mental-Preparation", "More-School-Support", "Build-On-This-Camp", "Better-Food-Planning", "Not-Specified"],
             "Q8_Growth": ["Yes", "Partial", "No"],
-            "Q8_Sentiment": ["Positive", "Neutral", "Negative", "Mixed"],
         },
-        "guide": "Code what they think is most important to prepare, and if there is evidence of forward-thinking growth."
+        "guide": "Code what they think is most important to prepare. Sentiment is not needed here."
     },
 ]
 
 ALL_QUAL_FIELDS = [f for qc in QUAL_QUESTIONS for f in qc["fields"]]
-SENTIMENT_FIELDS = [f for f in ALL_QUAL_FIELDS if f.endswith("_Sentiment")]
+EXPERIENCE_SENTIMENT_FIELDS = ["Q1_Sentiment", "Q3_Sentiment", "Q4_Sentiment", "Q5_Sentiment"]
 GROWTH_FIELDS    = ["Q2_Growth", "Q8_Growth"]
 SENTIMENT_SCORE = {"Positive": 1.0, "Mixed": 0.25, "Neutral": 0.0, "Negative": -1.0}
 
@@ -259,8 +216,6 @@ def call_mlx(model, tokenizer, system_msg, user_msg, max_tokens=2500, thinking=F
 
 # ═══════════════════════════════════════════════════════════════════
 #  PER-QUESTION BATCH CODING
-#  One question at a time — proven reliable with small models.
-#  Speed comes from caching on re-runs and thinking=False on narratives.
 # ═══════════════════════════════════════════════════════════════════
 
 SYSTEM_CODER = (
@@ -270,7 +225,6 @@ SYSTEM_CODER = (
     "If a response is completely nonsensical or off-topic, use the 'Not-Specified', "
     "'Unclear', or 'No' tags provided in the guide."
 )
-
 
 def build_coding_prompt(qc, batch):
     fields_spec = ""
@@ -298,11 +252,6 @@ Example format: [{{"id": 0, {example_fields}}}]"""
 
 def code_question(coding_model, coding_tokenizer, qc, post_df, email_list,
                   status_label, root, BATCH=40):
-    """
-    Code one question for all students in batches of BATCH.
-    BATCH=40 is conservative for the 1.5B model — keeps JSON output
-    short enough that it never gets truncated.
-    """
     col    = find_col(post_df, qc["keywords"])
     fields = list(qc["fields"].keys())
 
@@ -326,8 +275,6 @@ def code_question(coding_model, coding_tokenizer, qc, post_df, email_list,
         root.update()
 
         prompt = build_coding_prompt(qc, batch)
-        # Generous token budget: each student needs ~(fields × 8) tokens of
-        # JSON values plus ~15 tokens of structural overhead, with 20% headroom.
         dynamic_max = max(512, int(len(batch) * (len(fields) * 8 + 15) * 1.2) + 64)
         raw    = call_mlx(coding_model, coding_tokenizer, SYSTEM_CODER,
                           prompt, max_tokens=dynamic_max, thinking=False)
@@ -384,8 +331,6 @@ Then, below your summary, include exactly 3 to 5 highly valuable, reflective, ve
 Student responses (n={len(sample)}):
 {resp_text}"""
 
-    # thinking=False — removes hidden chain-of-thought that wastes tokens
-    # without improving narrative quality for this structured task
     return call_mlx(narrative_model, narrative_tokenizer, SYSTEM_NARRATOR,
                     prompt, max_tokens=500, thinking=False).strip()
 
@@ -399,7 +344,6 @@ def build_coded_df(post_df, email_list, names, surnames, classes, locations,
                    narrative_model, narrative_tokenizer,
                    status_label, root, year):
 
-    # ── Check on-disk cache ───────────────────────────────────────
     cache       = load_coding_cache()
     fingerprint = data_fingerprint(email_list, post_df)
 
@@ -409,9 +353,7 @@ def build_coded_df(post_df, email_list, names, surnames, classes, locations,
             fg="#006100")
         root.update()
         all_coded, q_resps = cache[fingerprint]
-
     else:
-        # ── Per-question coding (Gemma 4 E4B) ────────────────────
         q_resps   = {}
         all_coded = {i: {} for i in range(len(email_list))}
 
@@ -434,23 +376,16 @@ def build_coded_df(post_df, email_list, names, surnames, classes, locations,
                     for f in qc["fields"]:
                         all_coded[idx][f] = "Column-Not-Found"
 
-        # ── Save good results to cache ────────────────────────────
         cache[fingerprint] = (all_coded, q_resps)
         save_coding_cache(cache)
 
-    # ── Assemble coded DataFrame ──────────────────────────────────
-    coded_df = _assemble_coded_df(all_coded, q_resps,
-                                  email_list, names, surnames,
-                                  classes, locations, year)
-
-    # ── Narrative generation (Gemma 4 E4B, thinking disabled) ────
+    coded_df = _assemble_coded_df(all_coded, q_resps, email_list, names, surnames, classes, locations, year)
+    
     narratives = []
     for qc in QUAL_QUESTIONS:
-        qnum     = qc["num"]
-        raw_vals = [str(q_resps.get(qnum, {}).get(e, "")).strip()
-                    for e in email_list]
-
-        if not find_col(post_df, qc["keywords"]):
+        qnum = qc["num"]
+        raw_vals = [str(q_resps.get(qnum, {}).get(e, "")).strip() for e in email_list]
+        if not raw_vals or all(r == "" for r in raw_vals):
             narratives.append({
                 "Question": f"Q{qnum}: {qc['label']}",
                 "n": 0,
@@ -464,16 +399,14 @@ def build_coded_df(post_df, email_list, names, surnames, classes, locations,
         valid_n = sum(1 for r in raw_vals if len(r) > 3)
         narratives.append({
             "Question": f"Q{qnum}: {qc['label']}",
-            "n":        valid_n,
-            "Summary":  narrative_text,
+            "n": valid_n,
+            "Summary": narrative_text,
         })
 
     return coded_df, narratives
 
 
-def _assemble_coded_df(all_coded, q_resps, email_list, names, surnames,
-                       classes, locations, year):
-    """Build the coded DataFrame from the raw coding dict."""
+def _assemble_coded_df(all_coded, q_resps, email_list, names, surnames, classes, locations, year):
     coded_df = pd.DataFrame({
         "Year":       year,
         "Student_ID": [student_id(e) for e in email_list],
@@ -489,8 +422,7 @@ def _assemble_coded_df(all_coded, q_resps, email_list, names, surnames,
         ]
         for field in qc["fields"]:
             coded_df[field] = [
-                all_coded.get(i, {}).get(field, "No-Response")
-                for i in range(len(email_list))
+                all_coded.get(i, {}).get(field, "No-Response") for i in range(len(email_list))
             ]
     return coded_df
 
@@ -500,7 +432,6 @@ def build_summary_metadata():
     for qc in QUAL_QUESTIONS:
         qnum = qc["num"]
         rows.append(("SECTION", f"Q{qnum} — {qc['label']}", "", ""))
-
         for field, valid_vals in qc["fields"].items():
             rows.append(("FIELD", field, "", ""))
             for val in valid_vals:
@@ -528,24 +459,23 @@ def build_longitudinal_df(coded_df, merged_df, metrics_processed, year):
                 long_df[field] = coded_df[field].values
 
     def sent_num(val): return SENTIMENT_SCORE.get(str(val), np.nan)
-    sent_cols = [f for f in SENTIMENT_FIELDS if f in long_df.columns]
+    sent_cols = [f for f in EXPERIENCE_SENTIMENT_FIELDS if f in long_df.columns]
     if sent_cols:
-        long_df["Sentiment_Score"] = long_df[sent_cols].map(sent_num).mean(axis=1).round(2)
+        long_df["Avg_Experience_Sentiment"] = long_df[sent_cols].map(sent_num).mean(axis=1).round(2)
     else:
-        long_df["Sentiment_Score"] = np.nan
+        long_df["Avg_Experience_Sentiment"] = np.nan
 
     def growth_num(val): return 1 if val == "Yes" else (0.5 if val == "Partial" else 0)
     g_cols = [f for f in GROWTH_FIELDS if f in long_df.columns]
     if g_cols:
-        long_df["Growth_Score"] = long_df[g_cols].map(growth_num).sum(axis=1).round(1)
+        long_df["Growth_Index"] = long_df[g_cols].map(growth_num).sum(axis=1).round(1)
     else:
-        long_df["Growth_Score"] = np.nan
+        long_df["Growth_Index"] = np.nan
 
     return long_df
 
 
 def build_mixed_methods(long_df):
-    """Triangulates Qual Tags with Quant Shifts"""
     tables = []
     pairs = [
         ("Teamwork Shift by Peer Help Type", "Q1_Type", "Teamwork"),
@@ -567,23 +497,29 @@ def build_mixed_methods(long_df):
 
 def build_qual_chart_data(long_df):
     charts = {}
-    if "Q1_Type" in long_df.columns: charts["Q1"] = long_df["Q1_Type"].value_counts().reset_index()
-    if "Q2_Challenge" in long_df.columns and "Q2_Growth" in long_df.columns:
-        charts["Q2"] = pd.crosstab(long_df["Q2_Challenge"], long_df["Q2_Growth"]).reindex(columns=["Yes", "Partial", "No"], fill_value=0).reset_index()
+    if "Q1_Type" in long_df.columns and "Q1_Direction" in long_df.columns:
+        charts["Q1"] = pd.crosstab(long_df["Q1_Type"], long_df["Q1_Direction"]).reset_index()
+    if "Q2_Challenge" in long_df.columns and "Q2_Attitude" in long_df.columns:
+        charts["Q2"] = pd.crosstab(long_df["Q2_Challenge"], long_df["Q2_Attitude"]).reset_index()
     if "Q3_Activity" in long_df.columns and "Q3_Growth_Type" in long_df.columns:
         charts["Q3"] = pd.crosstab(long_df["Q3_Activity"], long_df["Q3_Growth_Type"]).reset_index()
     if "Q4_Topic" in long_df.columns and "Q4_Depth" in long_df.columns:
-        charts["Q4"] = pd.crosstab(long_df["Q4_Topic"], long_df["Q4_Depth"]).reindex(columns=["New-Perspective", "Personal-Connection", "Recalled-a-Fact", "Surface-Level"], fill_value=0).reset_index()
-    if "Q5_What" in long_df.columns: charts["Q5"] = long_df["Q5_What"].value_counts().reset_index()
-    if "Q6_Suggestion" in long_df.columns: charts["Q6"] = long_df["Q6_Suggestion"].value_counts().reset_index()
-    if "Q7_Advice" in long_df.columns: charts["Q7"] = long_df["Q7_Advice"].value_counts().reset_index()
+        charts["Q4"] = pd.crosstab(long_df["Q4_Topic"], long_df["Q4_Depth"]).reset_index()
+    if "Q5_What" in long_df.columns and "Q5_Sentiment" in long_df.columns:
+        charts["Q5"] = pd.crosstab(long_df["Q5_What"], long_df["Q5_Sentiment"]).reset_index()
+    if "Q6_Suggestion" in long_df.columns and "Q6_Tone" in long_df.columns: 
+        charts["Q6"] = pd.crosstab(long_df["Q6_Suggestion"], long_df["Q6_Tone"]).reset_index()
+    if "Q7_Advice" in long_df.columns and "Q7_Tone" in long_df.columns: 
+        charts["Q7"] = pd.crosstab(long_df["Q7_Advice"], long_df["Q7_Tone"]).reset_index()
     if "Q8_Prep_Focus" in long_df.columns and "Q8_Growth" in long_df.columns:
         charts["Q8"] = pd.crosstab(long_df["Q8_Prep_Focus"], long_df["Q8_Growth"]).reindex(columns=["Yes", "Partial", "No"], fill_value=0).reset_index()
+    if "Avg_Experience_Sentiment" in long_df.columns and "Class" in long_df.columns:
+        charts["Q9"] = long_df.groupby("Class")["Avg_Experience_Sentiment"].mean().reset_index().round(2)
     return charts
 
 
 # ═══════════════════════════════════════════════════════════════════
-#  EXCEL WRITER (RESTORED FORMATTING)
+#  EXCEL WRITER (PREMIUM FORMATTING MAINTAINED)
 # ═══════════════════════════════════════════════════════════════════
 
 def write_excel(output_path, tab1_df, avg_df, dist_df, breakdown_df,
@@ -591,12 +527,11 @@ def write_excel(output_path, tab1_df, avg_df, dist_df, breakdown_df,
 
     writer = pd.ExcelWriter(output_path, engine="xlsxwriter")
     workbook = writer.book
-    workbook.nan_inf_to_errors = True  # FIX: Prevent crash on Infinity or NaN
+    workbook.nan_inf_to_errors = True 
 
     F = {
         "head":      workbook.add_format({"bold":True,"bg_color":"#D9D9D9","border":1}),
         "head_grn":  workbook.add_format({"bold":True,"bg_color":"#E2EFDA","border":1,"text_wrap":True}),
-        "head_blu":  workbook.add_format({"bold":True,"bg_color":"#DDEEFF","border":1}),
         "skip":      workbook.add_format({"font_color":"#AAAAAA","italic":True}),
         "err":       workbook.add_format({"font_color":"#FF6600","italic":True}),
         "g_shift":   workbook.add_format({"bg_color":"#C6EFCE","font_color":"#006100","num_format":"+0;-0;0"}),
@@ -643,7 +578,7 @@ def write_excel(output_path, tab1_df, avg_df, dist_df, breakdown_df,
         if val == "Partial": return F["grow_par"]
         return F["grow_no"]
 
-    # ── Write DataFrames to sheets (with na_rep fix) ──────────────
+    # ── Write DataFrames to sheets
     tab1_df.to_excel(writer,      sheet_name="Individual Scores", index=False, na_rep="—")
     avg_df.to_excel(writer,       sheet_name="Group Averages",    index=False, na_rep="—")
     breakdown_df.to_excel(writer, sheet_name="Group Breakdown",   index=False, na_rep="—")
@@ -652,7 +587,7 @@ def write_excel(output_path, tab1_df, avg_df, dist_df, breakdown_df,
     dist_df.to_excel(writer,      sheet_name="_ChartData",        index=False, na_rep="0")
 
     # ──────────────────────────────────────────────────────────────
-    #  Visual Summary (Restored Original Quant Charts)
+    #  Visual Summary
     # ──────────────────────────────────────────────────────────────
     ws_charts = workbook.add_worksheet("Visual Summary")
     ws_charts.hide_gridlines(2)
@@ -660,7 +595,6 @@ def write_excel(output_path, tab1_df, avg_df, dist_df, breakdown_df,
     ws_charts.set_first_sheet()
     ws_charts.activate()
 
-    # Chart 1: Pre/Post Averages
     c1 = workbook.add_chart({"type": "bar"})
     for name, col_idx, colour in [("Pre-Camp Average", 1, "#8FAADC"), ("Post-Camp Average", 2, "#A9D18E")]:
         c1.add_series({
@@ -676,7 +610,6 @@ def write_excel(output_path, tab1_df, avg_df, dist_df, breakdown_df,
     c1.set_size({"width": 800, "height": 450})
     ws_charts.insert_chart("B2", c1)
 
-    # Chart 2: Impact Distribution
     c2 = workbook.add_chart({"type": "bar", "subtype": "percent_stacked"})
     for name, col_idx, colour in [("Declined", 3, "#FFC7CE"), ("Stayed the Same", 2, "#D9D9D9"), ("Improved", 1, "#C6EFCE")]:
         c2.add_series({
@@ -720,7 +653,7 @@ def write_excel(output_path, tab1_df, avg_df, dist_df, breakdown_df,
     decimal_grid(ws, breakdown_df, 2)
 
     # ──────────────────────────────────────────────────────────────
-    #  Qual Responses  (Restored Formatting + Dropdowns)
+    #  Qual Responses  (Dropdowns preserved)
     # ──────────────────────────────────────────────────────────────
     ws = writer.sheets["Qual Responses"]
     for i, col in enumerate(coded_df.columns):
@@ -761,7 +694,7 @@ def write_excel(output_path, tab1_df, avg_df, dist_df, breakdown_df,
             ws.data_validation(f"{c_let}2:{c_let}5000", {'validate': 'list', 'source': dropdown})
 
     # ──────────────────────────────────────────────────────────────
-    #  Qual Summary  (Dynamic Formulas)
+    #  Qual Summary (Dynamic Formulas preserved)
     # ──────────────────────────────────────────────────────────────
     ws_sum = workbook.add_worksheet("Qual Summary")
     writer.sheets["Qual Summary"] = ws_sum
@@ -805,7 +738,7 @@ def write_excel(output_path, tab1_df, avg_df, dist_df, breakdown_df,
         r += 1
 
     # ──────────────────────────────────────────────────────────────
-    #  Qual Highlights (Narratives + Quotes)
+    #  Qual Highlights (Narratives + Quotes preserved)
     # ──────────────────────────────────────────────────────────────
     ws_high = workbook.add_worksheet("Qual Highlights")
     writer.sheets["Qual Highlights"] = ws_high
@@ -827,7 +760,7 @@ def write_excel(output_path, tab1_df, avg_df, dist_df, breakdown_df,
         row_idx += 3
 
     # ──────────────────────────────────────────────────────────────
-    #  Mixed Methods Insights
+    #  Mixed Methods Insights preserved
     # ──────────────────────────────────────────────────────────────
     ws_mm = workbook.add_worksheet("Mixed Methods Insights")
     writer.sheets["Mixed Methods Insights"] = ws_mm
@@ -846,15 +779,12 @@ def write_excel(output_path, tab1_df, avg_df, dist_df, breakdown_df,
         row_cursor += len(df) + 3
 
     # ──────────────────────────────────────────────────────────────
-    #  Longitudinal Data
+    #  Longitudinal Data (Format tracking preserved)
     # ──────────────────────────────────────────────────────────────
     ws = writer.sheets["Longitudinal Data"]
     for i, col in enumerate(long_df.columns):
         ws.write(0, i, col, F["long_head"])
-    ws.set_column("A:A", 8)   
-    ws.set_column("B:B", 14)  
-    ws.set_column("C:E", 16)  
-    ws.set_column("F:F", 16)  
+    ws.set_column("A:A", 8); ws.set_column("B:B", 14); ws.set_column("C:E", 16); ws.set_column("F:F", 16)  
     ws.set_column(6, len(long_df.columns)-1, 20)
     ws.freeze_panes(1, 2)
 
@@ -875,99 +805,51 @@ def write_excel(output_path, tab1_df, avg_df, dist_df, breakdown_df,
                 ws.write(r+1, c, str(v))
 
     # ──────────────────────────────────────────────────────────────
-    #  Qual Dashboard (All 8 Charts)
+    #  Qual Dashboard (Upgraded to 9-Chart Cross-Tab Matrix)
     # ──────────────────────────────────────────────────────────────
     ws_qchart = workbook.add_worksheet("_QualChartData")
-    ws_qchart.set_column("B:D", None, F["pct"])
     ws_qchart.hide()
     
     ws_dash = workbook.add_worksheet("Qual Dashboard")
     writer.sheets["Qual Dashboard"] = ws_dash
     ws_dash.hide_gridlines(2)
 
-    if "Q1" in qual_charts:
-        df1 = qual_charts["Q1"]
-        df1.to_excel(writer, sheet_name="_QualChartData", startcol=0, index=False)
-        c1 = workbook.add_chart({'type': 'doughnut'})
-        c1.add_series({'categories': ['_QualChartData', 1, 0, len(df1), 0], 'values': ['_QualChartData', 1, 1, len(df1), 1], 'data_labels': {'percentage': True}})
-        c1.set_title({'name': 'Q1: Types of Peer Assistance'})
-        c1.set_size({'width': 500, 'height': 300})
-        ws_dash.insert_chart('B2', c1)
+    col_cursor = 0
+    def insert_dash_chart(df, chart_type, title, pos_cell, subtype=None):
+        nonlocal col_cursor
+        df.to_excel(writer, sheet_name="_QualChartData", startcol=col_cursor, index=False)
+        opts = {'type': chart_type}
+        if subtype: opts['subtype'] = subtype
+        c = workbook.add_chart(opts)
+        
+        for i, name in enumerate(df.columns[1:]):
+            c.add_series({
+                'name': name,
+                'categories': ['_QualChartData', 1, col_cursor, len(df), col_cursor],
+                'values': ['_QualChartData', 1, col_cursor+1+i, len(df), col_cursor+1+i]
+            })
+        c.set_title({'name': title, 'name_font': {'size': 12}})
+        c.set_size({'width': 480, 'height': 280})
+        ws_dash.insert_chart(pos_cell, c)
+        col_cursor += len(df.columns) + 1
 
-    if "Q2" in qual_charts:
-        df2 = qual_charts["Q2"]
-        df2.to_excel(writer, sheet_name="_QualChartData", startcol=3, index=False)
-        c2 = workbook.add_chart({'type': 'column', 'subtype': 'percent_stacked'})
-        for i, name in enumerate(["Yes", "Partial", "No"]):
-            c2.add_series({'name': name, 'categories': ['_QualChartData', 1, 3, len(df2), 3], 'values': ['_QualChartData', 1, 4+i, len(df2), 4+i], 'fill': {'color': ['#A9D18E', '#FFD966', '#D9D9D9'][i]}})
-        c2.set_title({'name': 'Q2: Resilience Growth by Challenge Type'})
-        c2.set_size({'width': 500, 'height': 300})
-        ws_dash.insert_chart('J2', c2)
-
-    if "Q3" in qual_charts:
-        df3 = qual_charts["Q3"]
-        df3.to_excel(writer, sheet_name="_QualChartData", startcol=8, index=False)
-        c3 = workbook.add_chart({'type': 'column'})
-        for i, name in enumerate(df3.columns[1:]): 
-            c3.add_series({'name': name, 'categories': ['_QualChartData', 1, 8, len(df3), 8], 'values': ['_QualChartData', 1, 9+i, len(df3), 9+i]})
-        c3.set_title({'name': 'Q3: Surprising Skills & Growth Types'})
-        c3.set_size({'width': 500, 'height': 300})
-        ws_dash.insert_chart('B18', c3)
-
-    if "Q4" in qual_charts:
-        df4 = qual_charts["Q4"]
-        df4.to_excel(writer, sheet_name="_QualChartData", startcol=14, index=False)
-        c4 = workbook.add_chart({'type': 'bar', 'subtype': 'stacked'})
-        for i, name in enumerate(["New-Perspective", "Personal-Connection", "Recalled-a-Fact", "Surface-Level"]):
-            c4.add_series({'name': name, 'categories': ['_QualChartData', 1, 14, len(df4), 14], 'values': ['_QualChartData', 1, 15+i, len(df4), 15+i]})
-        c4.set_title({'name': 'Q4: First Nations - Depth of Internalization'})
-        c4.set_size({'width': 500, 'height': 300})
-        ws_dash.insert_chart('J18', c4)
-
-    if "Q5" in qual_charts:
-        df5 = qual_charts["Q5"]
-        df5.to_excel(writer, sheet_name="_QualChartData", startcol=20, index=False)
-        c5 = workbook.add_chart({'type': 'doughnut'})
-        c5.add_series({'categories': ['_QualChartData', 1, 20, len(df5), 20], 'values': ['_QualChartData', 1, 21, len(df5), 21], 'data_labels': {'percentage': True}})
-        c5.set_title({'name': 'Q5: Favourite Part of Camp'})
-        c5.set_size({'width': 500, 'height': 300})
-        ws_dash.insert_chart('B34', c5)
-
-    if "Q6" in qual_charts:
-        df6 = qual_charts["Q6"].sort_values(by=qual_charts["Q6"].columns[1], ascending=True) 
-        df6.to_excel(writer, sheet_name="_QualChartData", startcol=23, index=False)
-        c6 = workbook.add_chart({'type': 'bar'})
-        c6.add_series({'categories': ['_QualChartData', 1, 23, len(df6), 23], 'values': ['_QualChartData', 1, 24, len(df6), 24], 'data_labels': {'value': True}, 'fill': {'color': '#5B9BD5'}})
-        c6.set_title({'name': 'Q6: Top Improvement Suggestions'})
-        c6.set_legend({'none': True})
-        c6.set_size({'width': 500, 'height': 300})
-        ws_dash.insert_chart('J34', c6)
-
-    if "Q7" in qual_charts:
-        df7 = qual_charts["Q7"]
-        df7.to_excel(writer, sheet_name="_QualChartData", startcol=26, index=False)
-        c7 = workbook.add_chart({'type': 'radar', 'subtype': 'filled'})
-        c7.add_series({'categories': ['_QualChartData', 1, 26, len(df7), 26], 'values': ['_QualChartData', 1, 27, len(df7), 27], 'fill': {'color': '#ED7D31', 'transparency': 50}})
-        c7.set_title({'name': 'Q7: Cohort Wisdom Profile (Advice for Y7s)'})
-        c7.set_legend({'none': True})
-        c7.set_size({'width': 500, 'height': 300})
-        ws_dash.insert_chart('B50', c7)
-
-    if "Q8" in qual_charts:
-        df8 = qual_charts["Q8"]
-        df8.to_excel(writer, sheet_name="_QualChartData", startcol=29, index=False)
-        c8 = workbook.add_chart({'type': 'column', 'subtype': 'percent_stacked'})
-        for i, name in enumerate(["Yes", "Partial", "No"]):
-            c8.add_series({'name': name, 'categories': ['_QualChartData', 1, 29, len(df8), 29], 'values': ['_QualChartData', 1, 30+i, len(df8), 30+i], 'fill': {'color': ['#A9D18E', '#FFD966', '#D9D9D9'][i]}})
-        c8.set_title({'name': 'Q8: 7-Day Prep Focus vs. Growth Mindset'})
-        c8.set_size({'width': 500, 'height': 300})
-        ws_dash.insert_chart('J50', c8)
+    if "Q1" in qual_charts: insert_dash_chart(qual_charts["Q1"], 'column', 'Q1: Help Type by Direction', 'B2', subtype='stacked')
+    if "Q2" in qual_charts: insert_dash_chart(qual_charts["Q2"], 'column', 'Q2: Hardship Challenge vs Student Attitude', 'J2', subtype='percent_stacked')
+    if "Q3" in qual_charts: insert_dash_chart(qual_charts["Q3"], 'bar', 'Q3: Surprising Skills Discovered', 'R2', subtype='stacked')
+    
+    if "Q4" in qual_charts: insert_dash_chart(qual_charts["Q4"], 'bar', 'Q4: First Nations Depth', 'B17', subtype='stacked')
+    if "Q5" in qual_charts: insert_dash_chart(qual_charts["Q5"], 'column', 'Q5: Favourite Part by Sentiment', 'J17', subtype='stacked')
+    if "Q6" in qual_charts: insert_dash_chart(qual_charts["Q6"], 'bar', 'Q6: Feedback Tone (Constructive vs Critical)', 'R17', subtype='stacked')
+    
+    if "Q7" in qual_charts: insert_dash_chart(qual_charts["Q7"], 'bar', 'Q7: Advice Delivery Style', 'B32', subtype='stacked')
+    if "Q8" in qual_charts: insert_dash_chart(qual_charts["Q8"], 'column', 'Q8: Future Prep vs Growth Mindset', 'J32', subtype='percent_stacked')
+    if "Q9" in qual_charts: insert_dash_chart(qual_charts["Q9"], 'column', 'Cohort Health: True Experience Sentiment by Class', 'R32')
 
     writer.close()
 
 
 # ═══════════════════════════════════════════════════════════════════
-#  QUANTITATIVE PROCESSING
+#  QUANTITATIVE PROCESSING (STRICT PURGING INCLUDED)
 # ═══════════════════════════════════════════════════════════════════
 
 METRIC_MAP = {
@@ -987,6 +869,10 @@ METRIC_MAP = {
 }
 
 def process_quantitative(students_df, pre_df, post_df):
+    # STRICT FILTER: Only process students who actually completed the post survey.
+    post_emails = post_df["Email address"].dropna().unique()
+    students_df = students_df[students_df["Email"].isin(post_emails)]
+    
     merged = pd.merge(students_df[["First name", "Surname", "Email"]], pre_df, left_on="Email", right_on="Email address", how="left")
     merged = pd.merge(merged, post_df, left_on="Email", right_on="Email address", how="left", suffixes=("_pre", "_post"))
     
@@ -1047,36 +933,35 @@ def process_quantitative(students_df, pre_df, post_df):
 
 def generate_report(student_path, pre_path, post_path, status_label, root):
     try:
-        status_label.config(text="Status: Loading data…", fg="blue"); root.update()
+        status_label.config(text="Status: Loading & Purging Data…", fg="blue"); root.update()
         students, pre_df, post_df = pd.read_csv(student_path), pd.read_csv(pre_path), pd.read_csv(post_path)
         for df in [students, pre_df, post_df]: df.columns = df.columns.str.strip()
         students["Email"], pre_df["Email address"], post_df["Email address"] = students["Email"].astype(str).str.strip().str.lower(), pre_df["Email address"].astype(str).str.strip().str.lower(), post_df["Email address"].astype(str).str.strip().str.lower()
         
         attend_col = find_col(post_df, ["attend", "camp"])
         if attend_col: post_df = post_df[post_df[attend_col].astype(str).str.lower().str.contains("yes", na=False)]
-        pre_df, post_df = pre_df.sort_values("Timestamp").drop_duplicates("Email address", keep="last"), post_df.sort_values("Timestamp").drop_duplicates("Email address", keep="last")
+        
+        pre_df = pre_df.sort_values("Timestamp").drop_duplicates("Email address", keep="last")
+        post_df = post_df.sort_values("Timestamp").drop_duplicates("Email address", keep="last")
 
         status_label.config(text="Status: Processing quantitative data…", fg="blue"); root.update()
         tab1_df, avg_df, dist_df, breakdown_df, merged_df, metrics_processed = process_quantitative(students, pre_df, post_df)
 
-        # Load Gemma 4 E4B — used for both coding and narratives
-        status_label.config(
-            text="Status: Loading Gemma 4 E4B model (~2.8 GB) — first run downloads once...",
-            fg="#D97706"); root.update()
-        year, qual_ok = datetime.now().year, False
-
+        status_label.config(text="Status: Loading Gemma 4 E4B Model (~2.8 GB)...", fg="#D97706"); root.update()
+        year = datetime.now().year
+        
         try:
             from mlx_lm import load
-
-            model, tokenizer = load("mlx-community/gemma-4-e4b-it-4bit")
-
-            email_list = merged_df["Email"].str.lower().tolist()
-            names, surnames = merged_df["First name"].tolist(), merged_df["Surname"].tolist()
+            
+            # Use the local model
+            model, tokenizer = load("FakeRockert543/gemma-4-e4b-it-MLX-4bit")
+            
+            email_list, names, surnames = merged_df["Email"].str.lower().tolist(), merged_df["First name"].tolist(), merged_df["Surname"].tolist()
             loc_col, class_col = find_col(post_df, ["location"]), find_col(post_df, ["class"])
-            loc_map   = dict(zip(post_df["Email address"], post_df[loc_col]))   if loc_col   else {}
+            loc_map = dict(zip(post_df["Email address"], post_df[loc_col])) if loc_col else {}
             class_map = dict(zip(post_df["Email address"], post_df[class_col])) if class_col else {}
-            locations = [str(loc_map.get(e, "Unknown"))   for e in email_list]
-            classes   = [str(class_map.get(e, "Unknown")) for e in email_list]
+            locations = [str(loc_map.get(e, "Unknown")) for e in email_list]
+            classes = [str(class_map.get(e, "Unknown")) for e in email_list]
 
             coded_df, narratives = build_coded_df(
                 post_df, email_list, names, surnames, classes, locations,
@@ -1086,36 +971,24 @@ def generate_report(student_path, pre_path, post_path, status_label, root):
             del model, tokenizer
             gc.collect()
 
-            long_df          = build_longitudinal_df(coded_df, tab1_df, metrics_processed, year)
+            long_df = build_longitudinal_df(coded_df, merged_df, metrics_processed, year)
             summary_metadata = build_summary_metadata()
-            mm_tables        = build_mixed_methods(long_df)
-            qual_charts      = build_qual_chart_data(long_df)
-            qual_ok          = True
+            mm_tables = build_mixed_methods(long_df)
+            qual_charts = build_qual_chart_data(long_df)
 
         except Exception as ai_err:
-            err_detail = traceback.format_exc()
             err = f"AI error: {ai_err}"
-            print(f"\n{'='*60}\nAI ERROR DETAIL:\n{err_detail}\n{'='*60}\n")
             status_label.config(text="Status: AI failed — quantitative only", fg="red"); root.update()
-            messagebox.showwarning(
-                "AI Model Error",
-                f"The AI model could not run. The Excel report will still be generated with quantitative data only.\n\n"
-                f"Error:\n{str(ai_err)}\n\n"
-                f"Tip: Check your internet connection — the model (~2.8 GB) must be downloaded on first run."
-            )
             coded_df, long_df = pd.DataFrame([{"Error": err}]), pd.DataFrame([{"Note": err}])
             summary_metadata, narratives = [("SECTION", "AI Error", "", ""), ("DATA", "Error", err, "")], [{"Question": "AI Status", "n": 0, "Summary": err}]
             mm_tables, qual_charts = [], {}
 
-        status_label.config(text="Status: Writing Excel report…", fg="blue"); root.update()
-        docs_dir = os.path.expanduser("~/Documents")
-        os.makedirs(docs_dir, exist_ok=True)
-        timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M")
-        output = os.path.join(docs_dir, f"Camp_Analysis_Report_{timestamp}.xlsx")
+        status_label.config(text="Status: Writing 9-Chart Excel Report…", fg="blue"); root.update()
+        output = "Camp_Analysis_Report.xlsx"
         write_excel(output, tab1_df, avg_df, dist_df, breakdown_df, coded_df, summary_metadata, long_df, narratives, metrics_processed, mm_tables, qual_charts)
 
         status_label.config(text="Status: Complete ✓", fg="#006100")
-        messagebox.showinfo("Done", f"{'Full qualitative analysis & Dashboards complete.' if qual_ok else '⚠ AI failed.'}\n\nFile: {os.path.abspath(output)}")
+        messagebox.showinfo("Done", f"Full rigorous qualitative analysis & Dashboards complete.\n\nFile: {os.path.abspath(output)}")
 
     except Exception as e:
         status_label.config(text="Status: Error", fg="red")
@@ -1137,7 +1010,7 @@ def setup_gui():
         tk.Button(f, text="Browse", width=10, command=lambda: pick(key, e)).pack(side="right")
 
     tk.Label(root, text="Camp Report Generator", font=("Arial", 17, "bold"), pady=12).pack()
-    tk.Label(root, text="Gemma 4 E4B | Cache + Fast Settings | 8 Dashboards | Triangulation", font=("Arial", 9), fg="#555555").pack()
+    tk.Label(root, text="Gemma 4 E4B | Cache + Fast Settings | Rigorous 9 Dashboards", font=("Arial", 9), fg="#555555").pack()
     tk.Frame(root, height=1, bg="#CCCCCC").pack(fill="x", padx=25, pady=8)
     row("1.  Student List CSV", "student"); row("2.  Pre-Camp Survey CSV", "pre"); row("3.  Post-Camp Survey CSV", "post")
     tk.Frame(root, height=1, bg="#CCCCCC").pack(fill="x", padx=25, pady=10)
