@@ -76,7 +76,7 @@ def safe_json(text):
 
 CACHE_DIR     = os.path.expanduser("~/Library/Application Support/Camp_Analysis")
 CACHE_FILE    = os.path.join(CACHE_DIR, "coding_cache.pkl")
-CACHE_VERSION = "v5-strict-rigorous"
+CACHE_VERSION = "v6-growth-fixes"
 
 def load_coding_cache():
     try:
@@ -126,7 +126,7 @@ QUAL_QUESTIONS = [
             "Q2_Growth": ["Yes", "Partial", "No"],
             "Q2_Attitude": ["Resilient-and-Proud", "Matter-of-Fact", "Overwhelmed-or-Negative"],
         },
-        "guide": "Code what the challenge was, how they responded, and their attitude looking back at the hardship."
+        "guide": "Code what the challenge was, how they responded, and their attitude looking back at the hardship. Also code Q2_Growth as 'Yes' (explicit growth), 'Partial' (implied), or 'No'."
     },
     {
         "num": 3, "label": "Surprising Skill",
@@ -183,7 +183,7 @@ QUAL_QUESTIONS = [
             "Q8_Prep_Focus": ["Get-Fitter", "Better-Packing", "Practice-Camp-Skills", "Mental-Preparation", "More-School-Support", "Build-On-This-Camp", "Better-Food-Planning", "Not-Specified"],
             "Q8_Growth": ["Yes", "Partial", "No"],
         },
-        "guide": "Code what they think is most important to prepare. Sentiment is not needed here."
+        "guide": "Code what they think is most important to prepare. Sentiment is not needed here. Code Q8_Growth as 'Yes' if they show forward-thinking/growth mindset, 'Partial' if somewhat, or 'No'."
     },
 ]
 
@@ -441,13 +441,12 @@ def build_summary_metadata():
     return rows
 
 
-def build_longitudinal_df(coded_df, merged_df, metrics_processed, year):
+def build_longitudinal_df(coded_df, tab1_df, merged_df, metrics_processed, year):
     long_df = coded_df[["Year","Student_ID","First_Name","Surname","Class","Location"]].copy()
 
     for metric in metrics_processed:
-        col_shift = metric
-        if col_shift in merged_df.columns:
-            long_df[f"{metric}_Shift"] = merged_df[col_shift].values
+        if metric in tab1_df.columns:
+            long_df[f"{metric}_Shift"] = tab1_df[metric].values
         for suffix in ("_pre", "_post"):
             candidates = [c for c in merged_df.columns if metric.lower().replace(" ","_") in c.lower() and c.endswith(suffix)]
             if candidates:
@@ -558,14 +557,21 @@ def write_excel(output_path, tab1_df, avg_df, dist_df, breakdown_df,
         "mm_head":   workbook.add_format({"bold":True,"bg_color":"#4472C4","font_color":"#FFFFFF","border":1}),
     }
 
-    def decimal_grid(ws, df, start_col):
+    def decimal_grid(ws, df, start_col, highlight_cols=None):
         for r in range(len(df)):
             for c in range(start_col, len(df.columns)):
                 v = df.iloc[r, c]
-                if pd.isna(v):   ws.write(r+1, c, "—", F["skip"])
-                elif v >  0.001: ws.write_number(r+1, c, v, F["g_dec"])
-                elif v < -0.001: ws.write_number(r+1, c, v, F["r_dec"])
-                else:            ws.write_number(r+1, c, v, F["z_dec"])
+                col_name = df.columns[c]
+                if pd.isna(v):   
+                    ws.write(r+1, c, "—", F["skip"])
+                elif highlight_cols and col_name not in highlight_cols:
+                    ws.write_number(r+1, c, v, F["z_dec"])
+                elif v >  0.001: 
+                    ws.write_number(r+1, c, v, F["g_dec"])
+                elif v < -0.001: 
+                    ws.write_number(r+1, c, v, F["r_dec"])
+                else:            
+                    ws.write_number(r+1, c, v, F["z_dec"])
 
     def sent_fmt(val):
         if val == "Positive": return F["sent_pos"]
@@ -578,25 +584,46 @@ def write_excel(output_path, tab1_df, avg_df, dist_df, breakdown_df,
         if val == "Partial": return F["grow_par"]
         return F["grow_no"]
 
-    # ── Write DataFrames to sheets
+    # ── Write DataFrames to sheets (Ordered perfectly)
     tab1_df.to_excel(writer,      sheet_name="Individual Scores", index=False, na_rep="—")
     avg_df.to_excel(writer,       sheet_name="Group Averages",    index=False, na_rep="—")
     breakdown_df.to_excel(writer, sheet_name="Group Breakdown",   index=False, na_rep="—")
-    coded_df.to_excel(writer,     sheet_name="Qual Responses",    index=False, na_rep="—")
-    long_df.to_excel(writer,      sheet_name="Longitudinal Data", index=False, na_rep="—")
+    
     dist_df.to_excel(writer,      sheet_name="_ChartData",        index=False, na_rep="0")
+    writer.sheets["_ChartData"].hide()
+
+    ws_charts = workbook.add_worksheet("Visual Summary")
+    ws_charts.hide_gridlines(2)
+    writer.sheets["Visual Summary"] = ws_charts
+
+    coded_df.to_excel(writer,     sheet_name="Qual Responses",    index=False, na_rep="—")
+    
+    ws_sum = workbook.add_worksheet("Qual Summary")
+    writer.sheets["Qual Summary"] = ws_sum
+    
+    ws_high = workbook.add_worksheet("Qual Highlights")
+    writer.sheets["Qual Highlights"] = ws_high
+    
+    ws_mm = workbook.add_worksheet("Mixed Methods Insights")
+    writer.sheets["Mixed Methods Insights"] = ws_mm
+
+    long_df.to_excel(writer,      sheet_name="Longitudinal Data", index=False, na_rep="—")
+    
+    ws_dash = workbook.add_worksheet("Qual Dashboard")
+    writer.sheets["Qual Dashboard"] = ws_dash
+    ws_dash.hide_gridlines(2)
+
+    ws_qchart = workbook.add_worksheet("_QualChartData")
+    writer.sheets["_QualChartData"] = ws_qchart
+    ws_qchart.hide()
 
     # ──────────────────────────────────────────────────────────────
     #  Visual Summary
     # ──────────────────────────────────────────────────────────────
-    ws_charts = workbook.add_worksheet("Visual Summary")
-    ws_charts.hide_gridlines(2)
-    writer.sheets["Visual Summary"] = ws_charts
-    ws_charts.set_first_sheet()
     ws_charts.activate()
 
     c1 = workbook.add_chart({"type": "bar"})
-    for name, col_idx, colour in [("Pre-Camp Average", 1, "#8FAADC"), ("Post-Camp Average", 2, "#A9D18E")]:
+    for name, col_idx, colour in [("Pre-Camp Avg", 1, "#8FAADC"), ("Post-Camp Avg", 2, "#A9D18E")]:
         c1.add_series({
             "name": name,
             "categories": ["Group Averages", 1, 0, len(avg_df), 0],
@@ -645,11 +672,11 @@ def write_excel(output_path, tab1_df, avg_df, dist_df, breakdown_df,
     ws = writer.sheets["Group Averages"]
     for i, col in enumerate(avg_df.columns): ws.write(0, i, col, F["head"])
     ws.set_column("A:A", 25); ws.set_column("B:D", 18)
-    decimal_grid(ws, avg_df, 1)
+    decimal_grid(ws, avg_df, 1, highlight_cols=["Avg Shift"])
 
     ws = writer.sheets["Group Breakdown"]
     for i, col in enumerate(breakdown_df.columns): ws.write(0, i, col, F["head"])
-    ws.set_column("A:B", 22); ws.set_column(2, len(breakdown_df.columns)-1, 16)
+    ws.set_column("A:C", 22); ws.set_column(3, len(breakdown_df.columns)-1, 16)
     decimal_grid(ws, breakdown_df, 2)
 
     # ──────────────────────────────────────────────────────────────
@@ -696,12 +723,9 @@ def write_excel(output_path, tab1_df, avg_df, dist_df, breakdown_df,
     # ──────────────────────────────────────────────────────────────
     #  Qual Summary (Dynamic Formulas preserved)
     # ──────────────────────────────────────────────────────────────
-    ws_sum = workbook.add_worksheet("Qual Summary")
-    writer.sheets["Qual Summary"] = ws_sum
     ws_sum.set_column("A:A", 38)
     ws_sum.set_column("B:B", 12)
     ws_sum.set_column("C:C", 12)
-    ws_sum.hide_gridlines(2)
 
     col_map = {name: xl_col_to_name(i) for i, name in enumerate(coded_df.columns)}
 
@@ -740,11 +764,8 @@ def write_excel(output_path, tab1_df, avg_df, dist_df, breakdown_df,
     # ──────────────────────────────────────────────────────────────
     #  Qual Highlights (Narratives + Quotes preserved)
     # ──────────────────────────────────────────────────────────────
-    ws_high = workbook.add_worksheet("Qual Highlights")
-    writer.sheets["Qual Highlights"] = ws_high
     ws_high.set_column("A:A", 25)
     ws_high.set_column("B:B", 110, F["wrap"])
-    ws_high.hide_gridlines(2)
 
     row_idx = 1
     for nar in narratives:
@@ -762,8 +783,6 @@ def write_excel(output_path, tab1_df, avg_df, dist_df, breakdown_df,
     # ──────────────────────────────────────────────────────────────
     #  Mixed Methods Insights preserved
     # ──────────────────────────────────────────────────────────────
-    ws_mm = workbook.add_worksheet("Mixed Methods Insights")
-    writer.sheets["Mixed Methods Insights"] = ws_mm
     ws_mm.set_column("A:A", 35); ws_mm.set_column("B:D", 15)
     row_cursor = 1
     for df in mm_tables:
@@ -807,13 +826,6 @@ def write_excel(output_path, tab1_df, avg_df, dist_df, breakdown_df,
     # ──────────────────────────────────────────────────────────────
     #  Qual Dashboard (Upgraded to 9-Chart Cross-Tab Matrix)
     # ──────────────────────────────────────────────────────────────
-    ws_qchart = workbook.add_worksheet("_QualChartData")
-    ws_qchart.hide()
-    
-    ws_dash = workbook.add_worksheet("Qual Dashboard")
-    writer.sheets["Qual Dashboard"] = ws_dash
-    ws_dash.hide_gridlines(2)
-
     col_cursor = 0
     def insert_dash_chart(df, chart_type, title, pos_cell, subtype=None):
         nonlocal col_cursor
@@ -915,12 +927,14 @@ def process_quantitative(students_df, pre_df, post_df):
     for cls in sorted(unique_classes):
         sub = tab1_df[tab1_df["Class"] == cls]
         row = {"Class": cls, "Location": "ALL LOCATIONS"}
+        row["Average Shift (All Areas)"] = sub[metrics].mean().mean()
         for m in metrics: row[m] = sub[m].mean()
         bd_rows.append(row)
         for loc in sorted(unique_locs):
             sl = sub[sub["Location"] == loc]
             if not sl.empty:
                 row2 = {"Class": f"  ↳ {loc}", "Location": loc}
+                row2["Average Shift (All Areas)"] = sl[metrics].mean().mean()
                 for m in metrics: row2[m] = sl[m].mean()
                 bd_rows.append(row2)
 
@@ -971,7 +985,7 @@ def generate_report(student_path, pre_path, post_path, status_label, root):
             del model, tokenizer
             gc.collect()
 
-            long_df = build_longitudinal_df(coded_df, merged_df, metrics_processed, year)
+            long_df = build_longitudinal_df(coded_df, tab1_df, merged_df, metrics_processed, year)
             summary_metadata = build_summary_metadata()
             mm_tables = build_mixed_methods(long_df)
             qual_charts = build_qual_chart_data(long_df)
