@@ -1171,394 +1171,337 @@ def _load_chartjs():
 
 def write_html_report(html_path, tab1_df, avg_df, dist_df, breakdown_df,
                       coded_df, narratives, metrics_processed, mm_tables, long_df):
-    """Generate a fully self-contained offline HTML presentation report."""
+    """Generate a fully self-contained, offline HTML presentation report."""
+    import json as _json
 
     year = datetime.now().year
 
-    # ── Build data for Chart.js
     def safe_float(v):
         try:
-            f = float(v)
-            return round(f, 2) if not (f != f) else 0
+            f = float(str(v).replace("+","").strip())
+            return round(f, 2) if f == f else 0
         except Exception:
             return 0
 
-    # Metric averages chart
-    metric_labels = []
-    pre_vals = []
-    post_vals = []
-    shift_vals = []
+    # ── Real stat card percentages from coded_df
+    def pct_val(field, positive_vals=("Positive",)):
+        if field not in coded_df.columns:
+            return 0
+        vals = coded_df[field]
+        valid = vals[~vals.isin(["No-Response","Column-Not-Found","Parse-Error",""])]
+        return round(len(valid[valid.isin(positive_vals)]) / len(valid) * 100) if len(valid) else 0
+
+    peer_pct   = pct_val("Q1_Sentiment")
+    fav_pct    = pct_val("Q5_Sentiment")
+    growth_pct = 0
+    for gf in ["Q2_Growth","Q8_Growth"]:
+        if gf in coded_df.columns:
+            v = coded_df[gf]
+            v = v[~v.isin(["No-Response","Column-Not-Found","Parse-Error",""])]
+            if len(v):
+                growth_pct = round(len(v[v.isin(["Yes","Partial"])]) / len(v) * 100)
+                break
+
+    # ── Metric chart data
+    metric_labels, pre_vals, post_vals, shift_vals = [], [], [], []
     if not avg_df.empty and "Metric" in avg_df.columns:
         for _, row in avg_df.iterrows():
-            metric_labels.append(str(row.get("Metric", "")))
+            metric_labels.append(str(row.get("Metric","")))
             pre_vals.append(safe_float(row.get("Pre-Camp Avg", 0)))
             post_vals.append(safe_float(row.get("Post-Camp Avg", 0)))
             shift_vals.append(safe_float(row.get("Avg Shift", 0)))
 
-    # Distribution chart
-    dist_labels = []
-    improved_vals = []
-    same_vals = []
-    declined_vals = []
+    # ── Distribution chart data
+    dist_labels, improved_vals, same_vals, declined_vals = [], [], [], []
     if not dist_df.empty:
         for _, row in dist_df.iterrows():
-            dist_labels.append(str(row.get("Metric", "")))
-            improved_vals.append(round(safe_float(row.get("Improved", 0)) * 100, 1))
-            same_vals.append(round(safe_float(row.get("Stayed Same", 0)) * 100, 1))
-            declined_vals.append(round(safe_float(row.get("Declined", 0)) * 100, 1))
+            dist_labels.append(str(row.get("Metric","")))
+            improved_vals.append(round(safe_float(row.get("Improved",0))*100, 1))
+            same_vals.append(round(safe_float(row.get("Stayed Same",0))*100, 1))
+            declined_vals.append(round(safe_float(row.get("Declined",0))*100, 1))
 
-    # Class breakdown
-    class_labels = []
-    class_shift_vals = []
+    # ── Class chart data
+    class_labels, class_shift_vals = [], []
     if not breakdown_df.empty:
         for _, row in breakdown_df.iterrows():
-            cls = str(row.get("Class", ""))
-            if not cls.startswith("  ↳"):
-                class_labels.append(cls)
-                class_shift_vals.append(safe_float(row.get("Average Shift (All Areas)", 0)))
+            cls = str(row.get("Class",""))
+            if not cls.startswith("  ↳") and cls not in ("","nan"):
+                class_labels.append(cls.strip())
+                class_shift_vals.append(safe_float(row.get("Average Shift (All Areas)",0)))
 
-    # Qual summary data for donut charts
-    def get_qual_counts(field_name, coded_df, qc_fields):
-        if field_name not in coded_df.columns:
-            return [], []
-        counts = coded_df[field_name].value_counts()
-        counts = counts[~counts.index.isin(["No-Response", "Column-Not-Found", "Parse-Error"])]
-        labels = [k.replace("-", " ") for k in counts.index.tolist()]
-        vals   = counts.values.tolist()
-        return labels, vals
-
-    def colour_for_shift(v):
-        if v > 0.05:  return "#2D7A4F"
-        if v < -0.05: return "#C0392B"
-        return "#6B7280"
-
-    # ── Build qual summary JSON for charts
+    # ── Qual chart data (counts per coded value, per field)
     qual_charts_js = {}
     for qc in QUAL_QUESTIONS:
-        qnum = qc["num"]
         for field in qc["fields"]:
-            labels, vals = get_qual_counts(field, coded_df, qc["fields"])
-            if labels:
-                qual_charts_js[field] = {"labels": labels, "data": vals}
+            if field not in coded_df.columns:
+                continue
+            counts = coded_df[field].value_counts()
+            counts = counts[~counts.index.isin(["No-Response","Column-Not-Found","Parse-Error",""])]
+            if len(counts) == 0:
+                continue
+            qual_charts_js[field] = {
+                "labels": [k.replace("-"," ") for k in counts.index.tolist()],
+                "data":   counts.values.tolist(),
+            }
 
-    # ── Narratives dict
-    narr_dict = {}
-    for nar in narratives:
-        narr_dict[nar["Question"]] = {"n": nar["n"], "summary": nar["Summary"]}
+    # ── Clean mm_tables: remove spurious header rows
+    clean_mm = []
+    for df in mm_tables:
+        if df.empty:
+            continue
+        df2 = df[df.get("Analysis","") != "Analysis"] if "Analysis" in df.columns else df
+        df2 = df2.dropna(subset=["Analysis"]) if "Analysis" in df2.columns else df2
+        df2 = df2[df2["Analysis"].astype(str).str.strip() != ""] if "Analysis" in df2.columns else df2
+        if not df2.empty:
+            clean_mm.append(df2)
 
-    # ── Mixed methods table HTML
+    # ── Mixed methods HTML blocks
     mm_html = ""
-    for mm_df in mm_tables:
-        if mm_df.empty: continue
-        title = mm_df.iloc[0, 0] if "Analysis" in mm_df.columns else "Analysis"
-        mm_html += f'<div class="mm-block"><h4 class="mm-title">{title}</h4><table class="mm-table"><thead><tr>'
-        for col in mm_df.columns[1:]:
-            mm_html += f"<th>{col}</th>"
-        mm_html += "</tr></thead><tbody>"
-        for _, row in mm_df.iterrows():
-            mm_html += "<tr>"
-            for c_idx, col in enumerate(mm_df.columns[1:]):
+    for df in clean_mm:
+        title = str(df["Analysis"].iloc[0]) if "Analysis" in df.columns else "Analysis"
+        cols  = [c for c in df.columns if c != "Analysis"]
+        rows_html = ""
+        for _, row in df.iterrows():
+            cells = ""
+            for col in cols:
                 val = row[col]
-                cell_class = ""
+                cls_attr = ""
                 if col == "Avg Shift":
                     try:
-                        fv = float(val)
-                        cell_class = " class='pos'" if fv > 0 else " class='neg'" if fv < 0 else ""
-                        val = f"{fv:+.2f}"
+                        fv = float(str(val).replace("+","").replace("−","-"))
+                        cls_attr = " class=\'pos\'" if fv > 0 else " class=\'neg\'" if fv < 0 else ""
+                        val = f"{fv:+.2f}" if fv != 0 else "0"
                     except Exception:
                         pass
-                mm_html += f"<td{cell_class}>{val}</td>"
-            mm_html += "</tr>"
-        mm_html += "</tbody></table></div>"
+                cells += f"<td{cls_attr}>{val}</td>"
+            rows_html += f"<tr>{cells}</tr>"
+        headers = "".join(f"<th>{c}</th>" for c in cols)
+        mm_html += (
+            f"<div class=\'mm-block\'><h4 class=\'mm-title\'>{title}</h4>"
+            f"<table class=\'mm-table\'><thead><tr>{headers}</tr></thead>"
+            f"<tbody>{rows_html}</tbody></table></div>"
+        )
+    mm_html = mm_html.replace("\'", '"')
 
-    # ── Qualitative section cards
+    # ── Parse narrative: split on *** to separate analysis from quotes
+    def parse_narrative(text):
+        if not text or str(text).strip() in ("","nan"):
+            return "", []
+        parts = str(text).split("***")
+        analysis = parts[0].replace("\\n","\n").strip()
+        quotes = []
+        if len(parts) > 1:
+            for line in parts[1].replace("\\n","\n").split("\n"):
+                line = line.strip().lstrip("*•-· ").strip().strip('"').strip("'").strip()
+                if len(line) > 8:
+                    quotes.append(line)
+        return analysis, quotes
+
+    # ── Build qual sections HTML
     qual_section_html = ""
-    for qc in QUAL_QUESTIONS:
-        qnum = qc["num"]
-        qkey = f"Q{qnum}: {qc['label']}"
-        nar  = narr_dict.get(qkey, {"n": 0, "summary": ""})
-        summary_text = nar.get("summary", "")
+    for nar in narratives:
+        q_label  = nar.get("Question","")
+        n_val    = nar.get("n", 0)
+        summary  = nar.get("Summary","")
+        analysis, quotes = parse_narrative(summary)
 
-        # Split summary from quotes
-        parts = summary_text.split("***")
-        analysis_paras = parts[0].strip() if parts else summary_text
-        quotes_raw = parts[1].strip() if len(parts) > 1 else ""
+        m = re.match(r"Q(\d+)", q_label)
+        qnum = int(m.group(1)) if m else 0
+        qlabel_display = re.sub(r"^Q\d+:\s*","", q_label)
 
-        # Format quotes
-        quote_items = ""
-        if quotes_raw:
-            for line in quotes_raw.split("\n"):
-                line = line.strip().lstrip("*•-").strip()
-                if len(line) > 5:
-                    quote_items += f'<li class="quote-item">&#8220;{line.strip(chr(34))}&#8221;</li>'
+        qc = next((q for q in QUAL_QUESTIONS if q["num"] == qnum), None)
+        fields = list(qc["fields"].keys()) if qc else []
 
-        # Build field charts for this question
-        field_charts_html = ""
-        for field in qc["fields"]:
+        # Field charts sidebar
+        field_charts = ""
+        for field in fields:
             if field in qual_charts_js:
-                safe_id = field.replace("_", "-").lower()
-                field_charts_html += f'''
-                <div class="field-chart-wrap">
-                    <h5 class="field-chart-title">{field.replace("_", " ")}</h5>
-                    <canvas id="chart-{safe_id}" height="160"></canvas>
-                </div>'''
+                cid = "chart-" + field.replace("_","-").lower()
+                field_charts += (
+                    "<div class=\'field-chart-wrap\'>"
+                    "<h5 class=\"field-chart-title\">" + field.replace("_"," ") + "</h5>"
+                    f"<canvas id=\'{cid}\' height=\'120\'></canvas>"
+                    "</div>"
+                )
+        field_charts = field_charts.replace("\'", '"')
 
-        qual_section_html += f'''
+        # Analysis paragraphs
+        analysis_html = "".join(
+            f"<p>{para.strip()}</p>"
+            for para in analysis.split("\n\n") if para.strip()
+        )
+
+        # Student quotes
+        quotes_html = ""
+        if quotes:
+            items = "".join(
+                f"<blockquote class=\'quote-item\'>&ldquo;{q}&rdquo;</blockquote>"
+                for q in quotes[:5]
+            ).replace("\'",'"')
+            quotes_html = f"<div class=\'quotes-block\'>{items}</div>".replace("\'",'"')
+
+        no_chart = "" if field_charts else "<p class=\'no-chart\'>Chart data populates after AI coding run.</p>".replace("\'",'"')
+
+        qual_section_html += f"""
         <div class="qual-section">
             <div class="qual-header">
                 <span class="q-num">Q{qnum}</span>
-                <span class="q-label">{qc["label"]}</span>
-                <span class="q-n">n = {nar["n"]}</span>
+                <span class="q-label">{qlabel_display}</span>
+                <span class="q-n">n&nbsp;=&nbsp;{n_val}</span>
             </div>
             <div class="qual-body">
-                <div class="qual-analysis">
-                    <h4>Analysis</h4>
-                    <div class="analysis-text">{analysis_paras.replace(chr(10), "<br>")}</div>
-                    {"<ul class='quotes-list'>" + quote_items + "</ul>" if quote_items else ""}
+                <div class="qual-left">
+                    <div class="qual-analysis">{analysis_html}</div>
+                    {quotes_html}
                 </div>
-                <div class="qual-charts">
-                    {field_charts_html}
-                </div>
+                <div class="qual-charts">{field_charts}{no_chart}</div>
             </div>
-        </div>'''
+        </div>"""
 
-    # ── Metric table HTML
+    # ── Metric table rows
     metric_rows_html = ""
-    if not avg_df.empty:
-        for _, row in avg_df.iterrows():
-            m    = str(row.get("Metric", ""))
-            pre  = safe_float(row.get("Pre-Camp Avg", 0))
-            post = safe_float(row.get("Post-Camp Avg", 0))
-            sh   = safe_float(row.get("Avg Shift", 0))
-            arrow = "▲" if sh > 0.05 else ("▼" if sh < -0.05 else "—")
-            cls  = "pos" if sh > 0.05 else ("neg" if sh < -0.05 else "zero")
-            bar_w = min(abs(sh) / 3 * 100, 100)
-            metric_rows_html += f'''
-            <tr>
-                <td class="metric-name">{m}</td>
-                <td class="num-cell">{pre:.1f}</td>
-                <td class="num-cell">{post:.1f}</td>
-                <td class="shift-cell {cls}">{arrow} {sh:+.2f}</td>
-                <td class="bar-cell">
-                    <div class="shift-bar {cls}" style="width:{bar_w:.0f}%;"></div>
-                </td>
-            </tr>'''
+    for i, m in enumerate(metric_labels):
+        pre  = pre_vals[i]
+        post = post_vals[i]
+        sh   = shift_vals[i]
+        arrow = "▲" if sh > 0.05 else ("▼" if sh < -0.05 else "—")
+        cls   = "pos" if sh > 0.05 else ("neg" if sh < -0.05 else "zero")
+        bar_w = min(abs(sh) / 3.0 * 100, 100)
+        metric_rows_html += (
+            f"<tr>"
+            f"<td class=\'metric-name\'>{m}</td>"
+            f"<td class=\'num-cell\'>{pre:.1f}</td>"
+            f"<td class=\'num-cell\'>{post:.1f}</td>"
+            f"<td class=\'shift-cell {cls}\'>{arrow} {sh:+.2f}</td>"
+            f"<td class=\'bar-cell\'><div class=\'shift-bar {cls}\' style=\'width:{bar_w:.0f}%;min-width:2px\'></div></td>"
+            f"</tr>"
+        ).replace("\'",'"')
 
-    # ── Class breakdown HTML
+    # ── Class breakdown rows
     class_rows_html = ""
+    class_header_cells = "<th>Class</th><th>Avg Shift</th>" + "".join(f"<th>{m}</th>" for m in metrics_processed)
     if not breakdown_df.empty:
         for _, row in breakdown_df.iterrows():
-            cls_name = str(row.get("Class", ""))
-            is_sub   = cls_name.startswith("  ↳")
-            row_class = "sub-row" if is_sub else "class-row"
-            avg_sh   = safe_float(row.get("Average Shift (All Areas)", 0))
-            sh_class = "pos" if avg_sh > 0 else ("neg" if avg_sh < 0 else "zero")
-            cells    = f'<td class="{row_class}">{cls_name.strip()}</td>'
-            cells   += f'<td class="num-cell {sh_class}">{avg_sh:+.2f}</td>'
+            cn  = str(row.get("Class",""))
+            sub = cn.startswith("  ↳")
+            rc  = "sub-row" if sub else "class-row"
+            av  = safe_float(row.get("Average Shift (All Areas)", 0))
+            sc  = "pos" if av > 0 else ("neg" if av < 0 else "zero")
+            cells = f"<td>{cn.strip()}</td><td class=\'num-cell {sc}\'>{av:+.2f}</td>"
             for m in metrics_processed:
-                v = safe_float(row.get(m, 0))
+                v  = safe_float(row.get(m, 0))
                 mc = "pos" if v > 0 else ("neg" if v < 0 else "zero")
-                cells += f'<td class="num-cell {mc}">{v:+.1f}</td>'
-            class_rows_html += f"<tr>{cells}</tr>"
+                cells += f"<td class=\'num-cell {mc}\'>{v:+.1f}</td>"
+            cells = cells.replace("\'",'"')
+            class_rows_html += f"<tr class=\'{rc}\'>{cells}</tr>".replace("\'",'"')
 
-    class_header_cells = '<th>Class</th><th>Avg All</th>' + "".join(f"<th>{m}</th>" for m in metrics_processed)
+    # ── Counts for hero section
+    n_students    = len(tab1_df)
+    n_improved    = sum(1 for v in shift_vals if v > 0)
+    n_metrics     = len(shift_vals)
+    overall_shift = f"{sum(shift_vals)/n_metrics:+.2f}" if n_metrics else "—"
 
-    # ── Build JSON blobs for inline scripts
-    qual_js = json.dumps(qual_charts_js)
+    # ── JS: map each qual field name to its canvas id
+    field_canvas_map_js = ""
+    for qc in QUAL_QUESTIONS:
+        for field in qc["fields"]:
+            cid = "chart-" + field.replace("_","-").lower()
+            field_canvas_map_js += f"  \"{field}\": \"{cid}\",\n"
+    field_canvas_map_js = field_canvas_map_js.replace("\'","'")
 
-    html = f"""<!DOCTYPE html>
+    shift_colours = _json.dumps(["#2D7A4F" if v > 0.05 else "#C0392B" if v < -0.05 else "#9CA3AF" for v in shift_vals])
+    qual_js       = _json.dumps(qual_charts_js, indent=2)
+
+    # Load Chart.js (embedded offline or CDN fallback)
+    chartjs_tag = _load_chartjs()
+
+    html = """<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Camp Report {year}</title>
-__CHARTJS_PLACEHOLDER__
+<title>Camp Report """ + str(year) + """</title>
+""" + chartjs_tag + """
 <style>
-  /* ── Reset & base */
-  *, *::before, *::after {{ box-sizing: border-box; margin: 0; padding: 0; }}
-  body {{
-    font-family: 'Segoe UI', Arial, sans-serif;
-    background: #F0F4F8;
-    color: #1a2332;
-    font-size: 14px;
-    line-height: 1.6;
-  }}
-
-  /* ── Navigation */
-  .nav {{
-    background: #1B3A5C;
-    color: white;
-    padding: 0 32px;
-    display: flex;
-    align-items: center;
-    height: 56px;
-    position: sticky;
-    top: 0;
-    z-index: 100;
-    box-shadow: 0 2px 8px rgba(0,0,0,0.2);
-  }}
-  .nav-title {{ font-size: 18px; font-weight: 700; flex: 1; }}
-  .nav-links {{ display: flex; gap: 24px; }}
-  .nav-links a {{
-    color: rgba(255,255,255,0.8); text-decoration: none;
-    font-size: 13px; font-weight: 500; padding: 4px 0;
-    border-bottom: 2px solid transparent; transition: all .2s;
-  }}
-  .nav-links a:hover {{ color: white; border-color: #2E8B88; }}
-
-  /* ── Page layout */
-  .page {{ max-width: 1200px; margin: 0 auto; padding: 32px 24px; }}
-
-  /* ── Hero / summary bar */
-  .hero {{
-    background: linear-gradient(135deg, #1B3A5C 0%, #2E8B88 100%);
-    color: white;
-    border-radius: 16px;
-    padding: 40px 48px;
-    margin-bottom: 32px;
-    display: flex;
-    align-items: center;
-    gap: 48px;
-  }}
-  .hero-text h1 {{ font-size: 28px; font-weight: 800; margin-bottom: 8px; }}
-  .hero-text p {{ opacity: .85; font-size: 15px; }}
-  .hero-stats {{ display: flex; gap: 32px; flex-shrink: 0; }}
-  .hero-stat {{ text-align: center; }}
-  .hero-stat .big {{ font-size: 42px; font-weight: 800; line-height: 1; }}
-  .hero-stat .lbl {{ font-size: 12px; opacity: .8; text-transform: uppercase; letter-spacing: .05em; margin-top: 4px; }}
-
-  /* ── Section headings */
-  .section-title {{
-    font-size: 20px; font-weight: 700; color: #1B3A5C;
-    margin: 40px 0 20px;
-    padding-bottom: 10px;
-    border-bottom: 3px solid #2E8B88;
-    display: flex; align-items: center; gap: 10px;
-  }}
-
-  /* ── Stat cards */
-  .cards {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 16px; margin-bottom: 24px; }}
-  .card {{
-    background: white; border-radius: 12px; padding: 20px 24px;
-    box-shadow: 0 1px 4px rgba(0,0,0,.08);
-    border-top: 4px solid #2E8B88;
-    transition: transform .15s, box-shadow .15s;
-  }}
-  .card:hover {{ transform: translateY(-2px); box-shadow: 0 4px 12px rgba(0,0,0,.12); }}
-  .card-val {{ font-size: 36px; font-weight: 800; color: #1B3A5C; line-height: 1; }}
-  .card-lbl {{ font-size: 13px; color: #6B7280; margin-top: 4px; }}
-  .card.green {{ border-top-color: #2D7A4F; }}
-  .card.green .card-val {{ color: #2D7A4F; }}
-  .card.amber {{ border-top-color: #D97706; }}
-  .card.amber .card-val {{ color: #D97706; }}
-  .card.purple {{ border-top-color: #5B21B6; }}
-  .card.purple .card-val {{ color: #5B21B6; }}
-
-  /* ── Metric table */
-  .metric-table {{ width: 100%; border-collapse: collapse; background: white;
-                    border-radius: 10px; overflow: hidden;
-                    box-shadow: 0 1px 4px rgba(0,0,0,.08); margin-bottom: 24px; }}
-  .metric-table th {{
-    background: #1B3A5C; color: white; padding: 12px 16px;
-    text-align: left; font-size: 12px; text-transform: uppercase; letter-spacing: .05em;
-  }}
-  .metric-table tr:nth-child(even) td {{ background: #F9FAFB; }}
-  .metric-table td {{ padding: 10px 16px; border-bottom: 1px solid #F0F0F0; }}
-  .metric-name {{ font-weight: 600; }}
-  .num-cell {{ text-align: center; font-variant-numeric: tabular-nums; }}
-  .shift-cell {{ text-align: center; font-weight: 700; font-size: 15px; min-width: 80px; }}
-  .bar-cell {{ width: 120px; }}
-  .shift-bar {{ height: 8px; border-radius: 4px; min-width: 2px; }}
-  .pos {{ color: #2D7A4F; }}
-  .pos .shift-bar, .shift-bar.pos {{ background: #2D7A4F; }}
-  .neg {{ color: #C0392B; }}
-  .neg .shift-bar, .shift-bar.neg {{ background: #C0392B; }}
-  .zero {{ color: #6B7280; }}
-  .zero .shift-bar, .shift-bar.zero {{ background: #D3D3D3; }}
-
-  /* ── Two-column chart layout */
-  .chart-grid {{ display: grid; grid-template-columns: 1fr 1fr; gap: 24px; margin-bottom: 24px; }}
-  .chart-box {{
-    background: white; border-radius: 12px; padding: 24px;
-    box-shadow: 0 1px 4px rgba(0,0,0,.08);
-  }}
-  .chart-box h3 {{ font-size: 15px; font-weight: 700; color: #1B3A5C; margin-bottom: 16px; }}
-  .chart-box canvas {{ max-height: 320px; }}
-
-  /* ── Class breakdown */
-  .breakdown-table {{ width: 100%; border-collapse: collapse; background: white;
-                       border-radius: 10px; overflow: hidden;
-                       box-shadow: 0 1px 4px rgba(0,0,0,.08); margin-bottom: 24px;
-                       font-size: 13px; }}
-  .breakdown-table th {{
-    background: #1B3A5C; color: white; padding: 10px 12px;
-    text-align: center; font-size: 11px; text-transform: uppercase; letter-spacing: .04em;
-  }}
-  .breakdown-table td {{ padding: 8px 12px; border-bottom: 1px solid #F0F0F0; text-align: center; }}
-  .class-row td {{ background: #EFF6FF; font-weight: 700; color: #1B3A5C; }}
-  .sub-row td {{ color: #374151; }}
-
-  /* ── Qualitative sections */
-  .qual-section {{
-    background: white; border-radius: 12px; margin-bottom: 24px;
-    box-shadow: 0 1px 4px rgba(0,0,0,.08); overflow: hidden;
-  }}
-  .qual-header {{
-    background: #1B3A5C; color: white; padding: 16px 24px;
-    display: flex; align-items: center; gap: 16px;
-  }}
-  .q-num {{
-    background: #2E8B88; color: white; border-radius: 6px;
-    padding: 4px 12px; font-weight: 800; font-size: 15px; flex-shrink: 0;
-  }}
-  .q-label {{ font-size: 17px; font-weight: 700; flex: 1; }}
-  .q-n {{ opacity: .75; font-size: 13px; flex-shrink: 0; }}
-  .qual-body {{ padding: 24px; display: grid; grid-template-columns: 1fr 320px; gap: 24px; }}
-  .qual-analysis h4 {{ font-size: 14px; color: #2E8B88; text-transform: uppercase;
-                        letter-spacing: .05em; margin-bottom: 10px; }}
-  .analysis-text {{ color: #374151; line-height: 1.7; font-size: 14px; }}
-  .quotes-list {{ margin-top: 16px; padding-left: 0; list-style: none; }}
-  .quote-item {{
-    background: #F0F9FF; border-left: 4px solid #2E8B88;
-    padding: 10px 14px; margin-bottom: 10px; border-radius: 0 8px 8px 0;
-    font-style: italic; color: #1B3A5C; font-size: 13.5px; line-height: 1.6;
-  }}
-  .qual-charts {{ display: flex; flex-direction: column; gap: 16px; }}
-  .field-chart-wrap {{ background: #F9FAFB; border-radius: 8px; padding: 12px; }}
-  .field-chart-title {{ font-size: 11px; font-weight: 600; color: #6B7280;
-                          text-transform: uppercase; letter-spacing: .04em; margin-bottom: 8px; }}
-
-  /* ── Mixed Methods */
-  .mm-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 20px; }}
-  .mm-block {{ background: white; border-radius: 10px; padding: 20px;
-                box-shadow: 0 1px 4px rgba(0,0,0,.08); }}
-  .mm-title {{ font-size: 13px; font-weight: 700; color: #1B3A5C; margin-bottom: 12px; border-bottom: 2px solid #2E8B88; padding-bottom: 6px; }}
-  .mm-table {{ width: 100%; border-collapse: collapse; font-size: 13px; }}
-  .mm-table th {{ background: #EFF6FF; padding: 8px 10px; text-align: left;
-                   font-size: 11px; color: #1B3A5C; border-bottom: 2px solid #2E8B88; }}
-  .mm-table td {{ padding: 7px 10px; border-bottom: 1px solid #F0F0F0; }}
-  .mm-table .pos {{ color: #2D7A4F; font-weight: 700; }}
-  .mm-table .neg {{ color: #C0392B; font-weight: 700; }}
-
-  /* ── Footer */
-  .footer {{ text-align: center; color: #9CA3AF; font-size: 12px; margin-top: 48px; padding: 24px; }}
-
-  /* ── Responsive */
-  @media (max-width: 768px) {{
-    .hero {{ flex-direction: column; padding: 28px 24px; gap: 24px; }}
-    .hero-stats {{ flex-wrap: wrap; justify-content: center; }}
-    .chart-grid {{ grid-template-columns: 1fr; }}
-    .qual-body {{ grid-template-columns: 1fr; }}
-    .qual-charts {{ display: none; }}
-    .nav-links {{ display: none; }}
-  }}
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+body{font-family:'Segoe UI',Arial,sans-serif;background:#F0F4F8;color:#1a2332;font-size:14px;line-height:1.6}
+.nav{background:#1B3A5C;color:white;padding:0 32px;display:flex;align-items:center;height:56px;position:sticky;top:0;z-index:100;box-shadow:0 2px 8px rgba(0,0,0,.2)}
+.nav-title{font-size:18px;font-weight:700;flex:1}
+.nav-links{display:flex;gap:24px}
+.nav-links a{color:rgba(255,255,255,.8);text-decoration:none;font-size:13px;font-weight:500;padding:4px 0;border-bottom:2px solid transparent;transition:all .2s}
+.nav-links a:hover{color:white;border-color:#2E8B88}
+.page{max-width:1200px;margin:0 auto;padding:32px 24px}
+.hero{background:linear-gradient(135deg,#1B3A5C 0%,#2E8B88 100%);color:white;border-radius:16px;padding:40px 48px;margin-bottom:32px;display:flex;align-items:center;gap:48px}
+.hero-text h1{font-size:28px;font-weight:800;margin-bottom:8px}
+.hero-text p{opacity:.85;font-size:15px}
+.hero-stats{display:flex;gap:32px;flex-shrink:0}
+.hero-stat{text-align:center}
+.hero-stat .big{font-size:42px;font-weight:800;line-height:1}
+.hero-stat .lbl{font-size:12px;opacity:.8;text-transform:uppercase;letter-spacing:.05em;margin-top:4px}
+.section-title{font-size:20px;font-weight:700;color:#1B3A5C;margin:40px 0 20px;padding-bottom:10px;border-bottom:3px solid #2E8B88;display:flex;align-items:center;gap:10px}
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:16px;margin-bottom:24px}
+.card{background:white;border-radius:12px;padding:20px 24px;box-shadow:0 1px 4px rgba(0,0,0,.08);border-top:4px solid #2E8B88;transition:transform .15s,box-shadow .15s}
+.card:hover{transform:translateY(-2px);box-shadow:0 4px 12px rgba(0,0,0,.12)}
+.card-val{font-size:36px;font-weight:800;color:#1B3A5C;line-height:1}
+.card-lbl{font-size:13px;color:#6B7280;margin-top:4px}
+.card.green{border-top-color:#2D7A4F}.card.green .card-val{color:#2D7A4F}
+.card.amber{border-top-color:#D97706}.card.amber .card-val{color:#D97706}
+.card.purple{border-top-color:#5B21B6}.card.purple .card-val{color:#5B21B6}
+.metric-table{width:100%;border-collapse:collapse;background:white;border-radius:10px;overflow:hidden;box-shadow:0 1px 4px rgba(0,0,0,.08);margin-bottom:24px}
+.metric-table th{background:#1B3A5C;color:white;padding:12px 16px;text-align:left;font-size:12px;text-transform:uppercase;letter-spacing:.05em}
+.metric-table tr:nth-child(even) td{background:#F9FAFB}
+.metric-table td{padding:10px 16px;border-bottom:1px solid #F0F0F0}
+.metric-name{font-weight:600}
+.num-cell{text-align:center;font-variant-numeric:tabular-nums}
+.shift-cell{text-align:center;font-weight:700;font-size:15px;min-width:80px}
+.bar-cell{width:120px}
+.shift-bar{height:8px;border-radius:4px}
+.pos{color:#2D7A4F}.pos .shift-bar,.shift-bar.pos{background:#2D7A4F}
+.neg{color:#C0392B}.neg .shift-bar,.shift-bar.neg{background:#C0392B}
+.zero{color:#6B7280}.zero .shift-bar,.shift-bar.zero{background:#D3D3D3}
+.chart-grid{display:grid;grid-template-columns:1fr 1fr;gap:24px;margin-bottom:24px}
+.chart-box{background:white;border-radius:12px;padding:24px;box-shadow:0 1px 4px rgba(0,0,0,.08)}
+.chart-box h3{font-size:15px;font-weight:700;color:#1B3A5C;margin-bottom:16px}
+.breakdown-wrap{overflow-x:auto;margin-bottom:24px}
+.breakdown-table{width:100%;border-collapse:collapse;background:white;border-radius:10px;overflow:hidden;box-shadow:0 1px 4px rgba(0,0,0,.08);font-size:12px;white-space:nowrap}
+.breakdown-table th{background:#1B3A5C;color:white;padding:9px 12px;text-align:center;font-size:11px;text-transform:uppercase;letter-spacing:.04em}
+.breakdown-table td{padding:8px 12px;border-bottom:1px solid #F0F0F0;text-align:center}
+.class-row td{background:#EFF6FF;font-weight:700;color:#1B3A5C;text-align:left}
+.sub-row td:first-child{text-align:left;color:#374151;padding-left:20px}
+.qual-section{background:white;border-radius:12px;margin-bottom:24px;box-shadow:0 1px 4px rgba(0,0,0,.08);overflow:hidden}
+.qual-header{background:#1B3A5C;color:white;padding:16px 24px;display:flex;align-items:center;gap:16px}
+.q-num{background:#2E8B88;color:white;border-radius:6px;padding:4px 12px;font-weight:800;font-size:15px;flex-shrink:0}
+.q-label{font-size:17px;font-weight:700;flex:1}
+.q-n{opacity:.75;font-size:13px;flex-shrink:0}
+.qual-body{padding:24px;display:grid;grid-template-columns:1fr 280px;gap:32px}
+.qual-analysis p{color:#374151;line-height:1.75;font-size:14px;margin-bottom:12px}
+.quotes-block{margin-top:16px;border-top:2px solid #E5E7EB;padding-top:16px}
+blockquote.quote-item{background:#F0F9FF;border-left:4px solid #2E8B88;padding:10px 14px;margin-bottom:10px;border-radius:0 8px 8px 0;font-style:italic;color:#1B3A5C;font-size:13.5px;line-height:1.6}
+.qual-charts{display:flex;flex-direction:column;gap:14px;border-left:1px solid #F0F0F0;padding-left:20px;min-width:0}
+.field-chart-wrap{background:#F9FAFB;border-radius:8px;padding:12px}
+.field-chart-title{font-size:10px;font-weight:700;color:#6B7280;text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px}
+.no-chart{color:#9CA3AF;font-size:12px;font-style:italic;padding:12px}
+.mm-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(340px,1fr));gap:20px}
+.mm-block{background:white;border-radius:10px;padding:20px;box-shadow:0 1px 4px rgba(0,0,0,.08)}
+.mm-title{font-size:13px;font-weight:700;color:#1B3A5C;margin-bottom:12px;border-bottom:2px solid #2E8B88;padding-bottom:6px}
+.mm-table{width:100%;border-collapse:collapse;font-size:13px}
+.mm-table th{background:#EFF6FF;padding:8px 10px;text-align:left;font-size:11px;color:#1B3A5C;border-bottom:2px solid #2E8B88}
+.mm-table td{padding:7px 10px;border-bottom:1px solid #F0F0F0}
+.mm-table .pos{color:#2D7A4F;font-weight:700}.mm-table .neg{color:#C0392B;font-weight:700}
+.footer{text-align:center;color:#9CA3AF;font-size:12px;margin-top:48px;padding:24px}
+@media(max-width:768px){
+  .hero{flex-direction:column;padding:28px 24px;gap:24px}
+  .hero-stats{flex-wrap:wrap;justify-content:center}
+  .chart-grid{grid-template-columns:1fr}
+  .qual-body{grid-template-columns:1fr}
+  .qual-charts{display:none}
+  .nav-links{display:none}
+}
 </style>
 </head>
 <body>
-
-<!-- Navigation -->
 <nav class="nav">
-  <div class="nav-title">🏕️ Camp Report {year}</div>
+  <div class="nav-title">&#127958; Camp Report """ + str(year) + """</div>
   <div class="nav-links">
     <a href="#overview">Overview</a>
     <a href="#skills">Skill Shifts</a>
@@ -1567,73 +1510,54 @@ __CHARTJS_PLACEHOLDER__
     <a href="#mixed">Insights</a>
   </div>
 </nav>
-
 <div class="page">
-
-  <!-- Hero -->
   <div class="hero" id="overview">
     <div class="hero-text">
-      <h1>Camp Report {year}</h1>
-      <p>A comprehensive view of student outcomes across quantitative skill assessments and qualitative survey responses.</p>
+      <h1>Camp Report """ + str(year) + """</h1>
+      <p>Comprehensive student outcomes: quantitative skill assessments and qualitative survey analysis.</p>
     </div>
     <div class="hero-stats">
-      <div class="hero-stat">
-        <div class="big">{len(tab1_df)}</div>
-        <div class="lbl">Students</div>
-      </div>
-      <div class="hero-stat">
-        <div class="big">{len(metrics_processed)}</div>
-        <div class="lbl">Skills Tracked</div>
-      </div>
-      <div class="hero-stat">
-        <div class="big">{len(QUAL_QUESTIONS)}</div>
-        <div class="lbl">Survey Questions</div>
-      </div>
+      <div class="hero-stat"><div class="big">""" + str(n_students) + """</div><div class="lbl">Students</div></div>
+      <div class="hero-stat"><div class="big">""" + str(n_metrics) + """</div><div class="lbl">Skills Tracked</div></div>
+      <div class="hero-stat"><div class="big">""" + str(len(QUAL_QUESTIONS)) + """</div><div class="lbl">Survey Qs</div></div>
     </div>
   </div>
 
-  <!-- Stat cards -->
   <div class="cards">
     <div class="card green">
-      <div class="card-val">{sum(1 for v in shift_vals if v > 0)}/{len(shift_vals)}</div>
+      <div class="card-val">""" + str(n_improved) + """/""" + str(n_metrics) + """</div>
       <div class="card-lbl">Skills with positive shift</div>
     </div>
     <div class="card">
-      <div class="card-val">{f"{sum(shift_vals)/len(shift_vals):+.2f}" if shift_vals else "—"}</div>
+      <div class="card-val">""" + overall_shift + """</div>
       <div class="card-lbl">Average shift across all skills</div>
     </div>
     <div class="card amber">
-      <div class="card-val">91%</div>
+      <div class="card-val">""" + str(peer_pct) + """%</div>
       <div class="card-lbl">Positive sentiment on peer support</div>
     </div>
     <div class="card purple">
-      <div class="card-val">94%</div>
-      <div class="card-lbl">Positive sentiment on camp overall</div>
+      <div class="card-val">""" + str(fav_pct) + """%</div>
+      <div class="card-lbl">Positive on favourite part</div>
     </div>
   </div>
 
-  <!-- Skill shifts -->
-  <h2 class="section-title" id="skills">📐 Skill & Attitude Shifts</h2>
+  <h2 class="section-title" id="skills">&#128208; Skill &amp; Attitude Shifts</h2>
   <table class="metric-table">
-    <thead>
-      <tr>
-        <th>Skill / Area</th>
-        <th style="text-align:center">Pre-Camp</th>
-        <th style="text-align:center">Post-Camp</th>
-        <th style="text-align:center">Shift</th>
-        <th>Change</th>
-      </tr>
-    </thead>
-    <tbody>
-      {metric_rows_html}
-    </tbody>
+    <thead><tr>
+      <th>Skill / Area</th>
+      <th style="text-align:center">Pre-Camp Avg</th>
+      <th style="text-align:center">Post-Camp Avg</th>
+      <th style="text-align:center">Shift</th>
+      <th>Change</th>
+    </tr></thead>
+    <tbody>""" + metric_rows_html + """</tbody>
   </table>
 
-  <!-- Charts -->
   <div class="chart-grid">
     <div class="chart-box">
-      <h3>Pre vs Post-Camp Scores by Skill</h3>
-      <canvas id="prepost-chart"></canvas>
+      <h3>Score Shift by Skill (post &#8722; pre)</h3>
+      <canvas id="shift-chart"></canvas>
     </div>
     <div class="chart-box">
       <h3>Who Improved, Stayed Same, or Declined?</h3>
@@ -1641,142 +1565,123 @@ __CHARTJS_PLACEHOLDER__
     </div>
   </div>
 
-  <!-- Class breakdown -->
-  <h2 class="section-title" id="classes">👥 Results by Class</h2>
-  <table class="breakdown-table">
-    <thead><tr>{class_header_cells}</tr></thead>
-    <tbody>{class_rows_html}</tbody>
-  </table>
-
-  <div class="chart-box" style="margin-bottom:24px">
-    <h3>Average Shift by Class</h3>
-    <canvas id="class-chart" style="max-height:200px"></canvas>
+  <div class="chart-grid">
+    <div class="chart-box">
+      <h3>Pre-Camp vs Post-Camp Average Scores</h3>
+      <canvas id="prepost-chart"></canvas>
+    </div>
+    <div class="chart-box">
+      <h3>Average Shift by Class</h3>
+      <canvas id="class-chart"></canvas>
+    </div>
   </div>
 
-  <!-- Qualitative analysis -->
-  <h2 class="section-title" id="qualitative">💬 Student Voice — Qualitative Analysis</h2>
-  {qual_section_html}
+  <h2 class="section-title" id="classes">&#128101; Results by Class</h2>
+  <div class="breakdown-wrap">
+    <table class="breakdown-table">
+      <thead><tr>""" + class_header_cells + """</tr></thead>
+      <tbody>""" + class_rows_html + """</tbody>
+    </table>
+  </div>
 
-  <!-- Mixed methods -->
-  <h2 class="section-title" id="mixed">🔬 Mixed Methods Insights</h2>
-  <p style="color:#6B7280; margin-bottom:20px; font-size:13px;">
-    These tables cross-reference students' written responses with their quantitative score shifts,
-    revealing how qualitative factors relate to measurable outcomes.
+  <h2 class="section-title" id="qualitative">&#128172; Student Voice &#8212; Qualitative Analysis</h2>
+  """ + qual_section_html + """
+
+  <h2 class="section-title" id="mixed">&#128300; Mixed Methods Insights</h2>
+  <p style="color:#6B7280;margin-bottom:20px;font-size:13px">
+    These tables cross-reference students&#8217; written responses with their quantitative score shifts.
   </p>
-  <div class="mm-grid">{mm_html}</div>
-
+  <div class="mm-grid">""" + mm_html + """</div>
 </div>
-
-<div class="footer">
-  Camp Report {year} · Generated by Camp Analysis Tool ·
-  Data is anonymised and aggregated. Individual student data has been removed.
-</div>
+<div class="footer">Camp Report """ + str(year) + """ &middot; Generated by Camp Analysis Tool &middot; Student data anonymised.</div>
 
 <script>
-// ── Colour palettes
-const PALETTE = [
-  '#2E8B88','#1B3A5C','#2D7A4F','#D97706','#5B21B6',
-  '#C0392B','#2980B9','#8E44AD','#16A085','#E67E22',
-];
-const PALETTE2 = ['#70AD47','#ED7D31','#4472C4','#FFC000','#FF0000','#00B0F0','#7030A0'];
+const PALETTE=['#2E8B88','#1B3A5C','#2D7A4F','#D97706','#5B21B6','#C0392B','#2980B9','#8E44AD','#16A085','#E67E22'];
 
-// ── Pre/Post chart
-const ctx1 = document.getElementById('prepost-chart').getContext('2d');
-new Chart(ctx1, {{
-  type: 'bar',
-  data: {{
-    labels: {json.dumps(metric_labels)},
-    datasets: [
-      {{ label: 'Pre-Camp', data: {json.dumps(pre_vals)}, backgroundColor: '#8FAADC', borderRadius: 3 }},
-      {{ label: 'Post-Camp', data: {json.dumps(post_vals)}, backgroundColor: '#70AD47', borderRadius: 3 }},
+new Chart(document.getElementById('shift-chart'),{
+  type:'bar',
+  data:{
+    labels:""" + _json.dumps(metric_labels) + """,
+    datasets:[{label:'Score Shift',data:""" + _json.dumps(shift_vals) + """,
+      backgroundColor:""" + shift_colours + """,borderRadius:4}]
+  },
+  options:{indexAxis:'y',responsive:true,
+    plugins:{legend:{display:false},tooltip:{callbacks:{label:c=>` ${c.parsed.x>=0?'+':''}${c.parsed.x.toFixed(2)}`}}},
+    scales:{x:{title:{display:true,text:'Change in score (post minus pre)'},grid:{color:'#F0F0F0'}},y:{grid:{display:false}}}
+  }
+});
+
+new Chart(document.getElementById('dist-chart'),{
+  type:'bar',
+  data:{
+    labels:""" + _json.dumps(dist_labels) + """,
+    datasets:[
+      {label:'Improved',data:""" + _json.dumps(improved_vals) + """,backgroundColor:'#4CAF50',borderRadius:2},
+      {label:'No Change',data:""" + _json.dumps(same_vals) + """,backgroundColor:'#D3D3D3',borderRadius:2},
+      {label:'Declined',data:""" + _json.dumps(declined_vals) + """,backgroundColor:'#FF6B6B',borderRadius:2}
     ]
-  }},
-  options: {{
-    indexAxis: 'y', responsive: true,
-    plugins: {{ legend: {{ position: 'top' }} }},
-    scales: {{ x: {{ min: 0, max: 10, title: {{ display: true, text: 'Score (out of 10)' }} }} }}
-  }}
-}});
+  },
+  options:{indexAxis:'y',responsive:true,
+    plugins:{legend:{position:'top'}},
+    scales:{x:{stacked:true,max:100,title:{display:true,text:'% of students'}},y:{stacked:true,grid:{display:false}}}
+  }
+});
 
-// ── Distribution chart
-const ctx2 = document.getElementById('dist-chart').getContext('2d');
-new Chart(ctx2, {{
-  type: 'bar',
-  data: {{
-    labels: {json.dumps(dist_labels)},
-    datasets: [
-      {{ label: 'Improved',   data: {json.dumps(improved_vals)},  backgroundColor: '#4CAF50', borderRadius: 2 }},
-      {{ label: 'No Change',  data: {json.dumps(same_vals)},      backgroundColor: '#D3D3D3', borderRadius: 2 }},
-      {{ label: 'Declined',   data: {json.dumps(declined_vals)},  backgroundColor: '#FF6B6B', borderRadius: 2 }},
+new Chart(document.getElementById('prepost-chart'),{
+  type:'bar',
+  data:{
+    labels:""" + _json.dumps(metric_labels) + """,
+    datasets:[
+      {label:'Pre-Camp',data:""" + _json.dumps(pre_vals) + """,backgroundColor:'#8FAADC',borderRadius:3},
+      {label:'Post-Camp',data:""" + _json.dumps(post_vals) + """,backgroundColor:'#70AD47',borderRadius:3}
     ]
-  }},
-  options: {{
-    indexAxis: 'y', responsive: true,
-    plugins: {{ legend: {{ position: 'top' }} }},
-    scales: {{ x: {{ stacked: true, max: 100, title: {{ display: true, text: '% of students' }} }}, y: {{ stacked: true }} }}
-  }}
-}});
+  },
+  options:{indexAxis:'y',responsive:true,
+    plugins:{legend:{position:'top'}},
+    scales:{x:{min:0,max:10,title:{display:true,text:'Score (out of 10)'}},y:{grid:{display:false}}}
+  }
+});
 
-// ── Class chart
-const ctx3 = document.getElementById('class-chart').getContext('2d');
-const classShifts = {json.dumps(class_shift_vals)};
-new Chart(ctx3, {{
-  type: 'bar',
-  data: {{
-    labels: {json.dumps(class_labels)},
-    datasets: [{{
-      label: 'Avg Shift',
-      data: classShifts,
-      backgroundColor: classShifts.map(v => v > 0 ? '#2D7A4F' : v < 0 ? '#C0392B' : '#D3D3D3'),
-      borderRadius: 4,
-    }}]
-  }},
-  options: {{
-    responsive: true,
-    plugins: {{ legend: {{ display: false }} }},
-    scales: {{ y: {{ title: {{ display: true, text: 'Average Shift' }} }} }}
-  }}
-}});
+const cShifts=""" + _json.dumps(class_shift_vals) + """;
+new Chart(document.getElementById('class-chart'),{
+  type:'bar',
+  data:{
+    labels:""" + _json.dumps(class_labels) + """,
+    datasets:[{label:'Avg Shift',data:cShifts,
+      backgroundColor:cShifts.map(v=>v>0?'#2D7A4F':v<0?'#C0392B':'#D3D3D3'),borderRadius:4}]
+  },
+  options:{responsive:true,
+    plugins:{legend:{display:false}},
+    scales:{y:{title:{display:true,text:'Avg Shift'},grid:{color:'#F0F0F0'}},x:{grid:{display:false}}}
+  }
+});
 
-// ── Qual field charts
-const qualData = {qual_js};
-const qualFieldMap = {{}};
-{chr(10).join("qualFieldMap['" + field + "'] = 'chart-" + field.replace("_","-").lower() + "';" for qc in QUAL_QUESTIONS for field in qc["fields"])}
-
-Object.entries(qualData).forEach(([field, d], idx) => {{
-  const canvasId = 'chart-' + field.replace(/_/g, '-').toLowerCase();
-  const canvas = document.getElementById(canvasId);
-  if (!canvas) return;
-  const ctx = canvas.getContext('2d');
-  new Chart(ctx, {{
-    type: 'doughnut',
-    data: {{
-      labels: d.labels,
-      datasets: [{{ data: d.data, backgroundColor: PALETTE, borderWidth: 1 }}]
-    }},
-    options: {{
-      responsive: true,
-      plugins: {{
-        legend: {{ position: 'right', labels: {{ font: {{ size: 10 }}, boxWidth: 12 }} }}
-      }}
-    }}
-  }});
-}});
+const qualData=""" + qual_js + """;
+const fieldCanvas={
+""" + field_canvas_map_js + """};
+Object.entries(qualData).forEach(([field,d])=>{
+  const cid=fieldCanvas[field];
+  if(!cid) return;
+  const el=document.getElementById(cid);
+  if(!el) return;
+  new Chart(el,{
+    type:'bar',
+    data:{labels:d.labels,datasets:[{data:d.data,backgroundColor:PALETTE.slice(0,d.data.length),borderRadius:3}]},
+    options:{
+      indexAxis:'y',responsive:true,
+      plugins:{legend:{display:false},tooltip:{callbacks:{label:c=>` ${c.parsed.x} students`}}},
+      scales:{x:{grid:{color:'#F0F0F0'},ticks:{font:{size:10}}},y:{grid:{display:false},ticks:{font:{size:10}}}}
+    }
+  });
+});
 </script>
 </body>
 </html>"""
 
-    # Embed Chart.js inline (offline) or fall back to CDN
-    chartjs_tag = _load_chartjs()
-    html = html.replace("__CHARTJS_PLACEHOLDER__", chartjs_tag)
     with open(html_path, "w", encoding="utf-8") as f:
         f.write(html)
     print(f"HTML report written: {html_path}")
 
-
-# ═══════════════════════════════════════════════════════════════════
-#  MAIN REPORT GENERATOR
-# ═══════════════════════════════════════════════════════════════════
 
 def generate_report(student_path, pre_path, post_path, status_label, root):
     try:
