@@ -192,6 +192,48 @@ SENTIMENT_SCORE          = {"Positive": 1.0, "Mixed": 0.25, "Neutral": 0.0, "Neg
 
 
 # ═══════════════════════════════════════════════════════════════════
+#  NON-ATTENDER ANALYSIS CODEBOOK
+# ═══════════════════════════════════════════════════════════════════
+
+NON_ATTEND_CODEBOOK = [
+    {
+        "num": 1,
+        "label": "Reason for Not Attending",
+        "fields": {
+            "NA_Reason": ["Health-or-Medical", "Family-Commitment", "Financial-Cost",
+                          "Fear-or-Anxiety", "Another-School-Event", "Personal-Choice",
+                          "Logistical", "Not-Specified"],
+            "NA_Regret": ["Yes", "Partial", "No", "Unclear"],
+            "NA_Sentiment": ["Regretful", "Neutral", "Relieved", "Unclear"],
+        },
+        "guide": (
+            "Code the primary reason the student did not attend camp. "
+            "NA_Regret: whether they express regret about missing it. "
+            "NA_Sentiment: their overall emotional tone toward not attending."
+        ),
+    },
+    {
+        "num": 2,
+        "label": "Constructive Feedback for Future Attendance",
+        "fields": {
+            "NA_Has_Constructive": ["Yes", "Partial", "No"],
+            "NA_Support_Type": ["Financial-Aid", "Medical-or-Dietary", "More-Notice-or-Info",
+                                "Flexible-Scheduling", "Anxiety-or-Social-Support",
+                                "Gear-or-Equipment", "Not-Applicable", "Not-Specified"],
+        },
+        "guide": (
+            "Code whether the response contains actionable suggestions for how the school "
+            "could help this student attend in future. "
+            "Yes = specific and actionable, Partial = vague or implied, No = no suggestion. "
+            "NA_Support_Type: primary type of support that would help them attend."
+        ),
+    },
+]
+
+ALL_NON_ATTEND_FIELDS = [f for qc in NON_ATTEND_CODEBOOK for f in qc["fields"]]
+
+
+# ═══════════════════════════════════════════════════════════════════
 #  MLX INFERENCE
 # ═══════════════════════════════════════════════════════════════════
 
@@ -473,6 +515,146 @@ def build_qual_chart_data(long_df):
 
 
 # ═══════════════════════════════════════════════════════════════════
+#  NON-ATTENDER ANALYSIS PIPELINE
+# ═══════════════════════════════════════════════════════════════════
+
+def _find_non_attend_text_cols(df):
+    """Return up to 4 free-text columns from non-attending students."""
+    priority_kw = [["reason"], ["why"], ["unable"], ["could not"],
+                   ["feedback"], ["comment"], ["suggest"], ["help"]]
+    found = []
+    for kws in priority_kw:
+        col = find_col(df, kws)
+        if col and col not in found:
+            found.append(col)
+    # Catch any column that is >30% filled with non-numeric text
+    for col in df.columns:
+        if col in found:
+            continue
+        vals = df[col].dropna().astype(str)
+        if len(vals) == 0:
+            continue
+        text_vals = vals[vals.str.len() > 5]
+        if len(text_vals) / max(len(df), 1) < 0.3:
+            continue
+        non_num = text_vals[~text_vals.str.fullmatch(r'[\d\.\+\-\/\:\s,]+')]
+        if len(non_num) / max(len(text_vals), 1) > 0.5:
+            found.append(col)
+    return found[:4]
+
+
+def _combined_row_text(row, text_cols):
+    """Concatenate all non-empty text fields for a DataFrame row."""
+    parts = []
+    for col in text_cols:
+        v = str(row.get(col, "")).strip()
+        if len(v) > 3 and v.lower() not in ("nan", "none", "n/a", "-"):
+            parts.append(v)
+    return " | ".join(parts) if parts else ""
+
+
+def code_non_attend_question(model, tokenizer, qc, combined_texts,
+                              status_label, root, BATCH=40):
+    """Code all non-attender combined texts for one NON_ATTEND_CODEBOOK entry."""
+    fields    = list(qc["fields"].keys())
+    items     = [{"id": i, "text": t, "empty": len(t.strip()) <= 3}
+                 for i, t in enumerate(combined_texts)]
+    coded     = {}
+    to_code   = [it for it in items if not it["empty"]]
+    total_bat = max(1, (len(to_code) + BATCH - 1) // BATCH)
+
+    for bn, start in enumerate(range(0, len(to_code), BATCH), 1):
+        batch = to_code[start:start + BATCH]
+        status_label.config(
+            text=f"Status: Coding non-attenders ({qc['label']}) — batch {bn}/{total_bat}…",
+            fg="#D97706")
+        root.update()
+        prompt      = build_coding_prompt(qc, batch)
+        dynamic_max = max(512, int(len(batch) * (len(fields) * 8 + 15) * 1.2) + 64)
+        raw         = call_mlx(model, tokenizer, SYSTEM_CODER, prompt,
+                               max_tokens=dynamic_max, thinking=False)
+        parsed      = safe_json(raw)
+        if isinstance(parsed, list):
+            for row in parsed:
+                if isinstance(row, dict) and "id" in row:
+                    coded[row["id"]] = {f: str(row.get(f, "Parse-Error")).strip()
+                                        for f in fields}
+        for it in batch:
+            if it["id"] not in coded:
+                coded[it["id"]] = {f: "Parse-Error" for f in fields}
+
+    for it in items:
+        if it["empty"]:
+            coded[it["id"]] = {f: "No-Response" for f in fields}
+    return coded
+
+
+def build_non_attend_analysis(non_attend_df, model, tokenizer, status_label, root):
+    """Full pipeline: code non-attender responses + generate AI narratives."""
+    if non_attend_df is None or non_attend_df.empty:
+        return pd.DataFrame(), []
+
+    name_col  = find_col(non_attend_df, ["first", "name"]) or find_col(non_attend_df, ["name"])
+    class_col = find_col(non_attend_df, ["class"])
+    names     = non_attend_df[name_col].astype(str).tolist() if name_col else ["Student"] * len(non_attend_df)
+    classes   = non_attend_df[class_col].astype(str).tolist() if class_col else ["Unknown"] * len(non_attend_df)
+
+    text_cols      = _find_non_attend_text_cols(non_attend_df)
+    combined_texts = [_combined_row_text(row, text_cols)
+                      for _, row in non_attend_df.iterrows()]
+
+    all_coded  = {i: {} for i in range(len(non_attend_df))}
+    narratives = []
+
+    for qc in NON_ATTEND_CODEBOOK:
+        q_coded = code_non_attend_question(model, tokenizer, qc,
+                                           combined_texts, status_label, root)
+        for idx in range(len(non_attend_df)):
+            all_coded[idx].update(q_coded.get(idx,
+                {f: "Parse-Error" for f in qc["fields"]}))
+
+        status_label.config(
+            text=f"Status: Writing non-attender narrative ({qc['label']})…", fg="#D97706")
+        root.update()
+        sample = [t for t in combined_texts if len(t) > 3][:50]
+        if sample:
+            resp_text = "\n".join(f"- {r}" for r in sample)
+            prompt = (
+                f'Summarise these responses from students who did NOT attend camp, '
+                f'specifically about: "{qc["label"]}"\n\n'
+                f'Write exactly 2 short paragraphs:\n'
+                f'  1. The most common themes and patterns across these responses.\n'
+                f'  2. What these responses reveal about barriers to attendance and '
+                f'opportunities for the school to improve future participation.\n\n'
+                f'Then list 3 to 5 verbatim student quotes that best capture the key themes. '
+                f'Format with bullet points and quotation marks.\n\n'
+                f'Student responses (n={len(sample)}):\n{resp_text}'
+            )
+            narr_text = call_mlx(model, tokenizer, SYSTEM_NARRATOR,
+                                 prompt, max_tokens=500, thinking=False).strip()
+            valid_n   = sum(1 for t in combined_texts if len(t) > 3)
+        else:
+            narr_text = "No usable responses found for this question."
+            valid_n   = 0
+        narratives.append({
+            "Question": f"Q{qc['num']}: {qc['label']}",
+            "n":        valid_n,
+            "Summary":  narr_text,
+        })
+
+    na_df = pd.DataFrame({
+        "Student_Name":  names,
+        "Class":         classes,
+        "Combined_Text": combined_texts,
+    })
+    for qc in NON_ATTEND_CODEBOOK:
+        for field in qc["fields"]:
+            na_df[field] = [all_coded.get(i, {}).get(field, "No-Response")
+                            for i in range(len(non_attend_df))]
+    return na_df, narratives
+
+
+# ═══════════════════════════════════════════════════════════════════
 #  QUANTITATIVE PROCESSING
 # ═══════════════════════════════════════════════════════════════════
 
@@ -490,6 +672,12 @@ METRIC_MAP = {
     "Autonomy":           (["organising", "own gear"], ["during camp", "manage", "own gear"]),
     "Drive":              (["physical activity", "tiring"], ["things got tiring", "focus", "energy"]),
     "Aboriginal Culture": (["Thinking back", "Aboriginal culture"],["Now that camp is finished","Aboriginal culture"]),
+}
+
+# Post-only metrics: no pre-camp baseline — reported as standalone scores.
+# Both keywords are searched in post_df only.
+POST_ONLY_METRICS = {
+    "Y9 Camp Readiness": ["7 day camp", "year 9"],   # post-camp col 28
 }
 
 def process_quantitative(students_df, pre_df, post_df):
@@ -518,10 +706,16 @@ def process_quantitative(students_df, pre_df, post_df):
     avgs, dists, metrics = [], [], []
     for name, (pk, qk) in METRIC_MAP.items():
         pc, qc = find_col(pre_df, pk), find_col(post_df, qk)
+        mp_suffix = "_pre"
+        if not pc:
+            # Pre-camp keyword not in pre_df — check post_df (e.g. Aboriginal Culture uses
+            # a retrospective "Thinking back…" question on the post-camp form as its baseline).
+            pc = find_col(post_df, pk)
+            mp_suffix = "_post"
         if not pc or not qc:
             continue
-        mp = pc + "_pre"  if pc + "_pre"  in merged.columns else pc
-        mq = qc + "_post" if qc + "_post" in merged.columns else qc
+        mp = pc + mp_suffix if pc + mp_suffix in merged.columns else pc
+        mq = qc + "_post"   if qc + "_post"   in merged.columns else qc
         if mp not in merged.columns or mq not in merged.columns:
             continue
         pre_s  = pd.to_numeric(merged[mp], errors="coerce")
@@ -532,7 +726,9 @@ def process_quantitative(students_df, pre_df, post_df):
         mask = pd.notna(pre_s) & pd.notna(post_s)
         vp, vq, vd = pre_s[mask], post_s[mask], diff[mask]
         avgs.append({"Metric": name, "Pre-Camp Avg": vp.mean(), "Post-Camp Avg": vq.mean(),
-                     "Avg Shift": vq.mean() - vp.mean()})
+                     "Avg Shift": vq.mean() - vp.mean(),
+                     "Median Shift": float(vd.median()),
+                     "% Improvers": round(len(vd[vd > 0]) / len(vd) * 100, 1) if len(vd) else 0})
         dists.append({"Metric": name,
                       "Improved":    len(vd[vd > 0]) / len(vd) if len(vd) else 0,
                       "Stayed Same": len(vd[vd == 0]) / len(vd) if len(vd) else 0,
@@ -558,7 +754,26 @@ def process_quantitative(students_df, pre_df, post_df):
                     row2[m] = sl[m].mean()
                 bd_rows.append(row2)
 
-    return tab1_df, pd.DataFrame(avgs), pd.DataFrame(dists), pd.DataFrame(bd_rows), merged, metrics
+    post_only_scores = _compute_post_only_scores(post_df, merged)
+    return tab1_df, pd.DataFrame(avgs), pd.DataFrame(dists), pd.DataFrame(bd_rows), merged, metrics, post_only_scores
+
+
+def _compute_post_only_scores(post_df, merged):
+    """Compute averages for POST_ONLY_METRICS (no pre-camp baseline exists)."""
+    scores = {}
+    for name, keywords in POST_ONLY_METRICS.items():
+        col = find_col(post_df, keywords)
+        if not col:
+            continue
+        mc = col + "_post" if col + "_post" in merged.columns else col
+        if mc not in merged.columns:
+            mc = col if col in merged.columns else None
+        if not mc:
+            continue
+        vals = pd.to_numeric(merged[mc], errors="coerce").dropna()
+        if len(vals):
+            scores[name] = {"avg": round(float(vals.mean()), 2), "n": int(len(vals))}
+    return scores
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -584,7 +799,8 @@ C = {
 
 def write_excel(output_path, tab1_df, avg_df, dist_df, breakdown_df,
                 coded_df, summary_metadata, long_df, narratives,
-                metrics_processed, mm_tables, qual_charts):
+                metrics_processed, mm_tables, qual_charts, post_only_scores=None,
+                na_df=None, na_narratives=None):
 
     writer   = pd.ExcelWriter(output_path, engine="xlsxwriter")
     workbook = writer.book
@@ -679,6 +895,7 @@ def write_excel(output_path, tab1_df, avg_df, dist_df, breakdown_df,
     ws_sum  = workbook.add_worksheet("Qual Summary")
     ws_high = workbook.add_worksheet("Qual Highlights")
     ws_mm   = workbook.add_worksheet("Mixed Methods")
+    ws_na   = workbook.add_worksheet("🚫 Non-Attenders")
 
     coded_df.to_excel(writer, sheet_name="Qual Responses", index=False, na_rep="—")
     long_df.to_excel(writer,  sheet_name="Longitudinal Data", index=False, na_rep="—")
@@ -690,6 +907,7 @@ def write_excel(output_path, tab1_df, avg_df, dist_df, breakdown_df,
     writer.sheets["Qual Summary"]     = ws_sum
     writer.sheets["Qual Highlights"]  = ws_high
     writer.sheets["Mixed Methods"]    = ws_mm
+    writer.sheets["🚫 Non-Attenders"] = ws_na
     writer.sheets["Qual Responses"]   = writer.sheets["Qual Responses"]
     writer.sheets["Longitudinal Data"]= writer.sheets["Longitudinal Data"]
     writer.sheets["_QualDash"]        = ws_dash
@@ -753,7 +971,9 @@ def write_excel(output_path, tab1_df, avg_df, dist_df, breakdown_df,
         ws_exec.write(9, 1, "Skill / Area",    hdr_fmt)
         ws_exec.write(9, 2, "Pre-Camp",        hdr_fmt)
         ws_exec.write(9, 3, "Post-Camp",       hdr_fmt)
-        ws_exec.merge_range(9, 4, 9, 7, "Shift", hdr_fmt)
+        ws_exec.merge_range(9, 4, 9, 5, "Avg Shift", hdr_fmt)
+        ws_exec.write(9, 6, "Median Shift",    hdr_fmt)
+        ws_exec.write(9, 7, "% Improvers",     hdr_fmt)
         ws_exec.write(9, 8, "Direction",        hdr_fmt)
 
         for ri, row_data in avg_df.iterrows():
@@ -788,11 +1008,67 @@ def write_excel(output_path, tab1_df, avg_df, dist_df, breakdown_df,
             ws_exec.write(er, 1, row_data.get("Metric", ""), base_fmt)
             ws_exec.write(er, 2, row_data.get("Pre-Camp Avg", ""), num_fmt)
             ws_exec.write(er, 3, row_data.get("Post-Camp Avg", ""), num_fmt)
-            ws_exec.merge_range(er, 4, er, 7, shift, sf)
+            ws_exec.merge_range(er, 4, er, 5, shift, sf)
+            # Median Shift
+            med = row_data.get("Median Shift", 0) or 0
+            if med > 0.05:
+                med_sf = workbook.add_format({"bg_color": C["green_light"], "font_color": C["green"],
+                                               "bold": True, "num_format": "+0.0;-0.0;0.0",
+                                               "align": "center", "font_name": "Arial"})
+            elif med < -0.05:
+                med_sf = workbook.add_format({"bg_color": C["red_light"], "font_color": C["red"],
+                                               "bold": True, "num_format": "+0.0;-0.0;0.0",
+                                               "align": "center", "font_name": "Arial"})
+            else:
+                med_sf = num_fmt
+            ws_exec.write(er, 6, med, med_sf)
+            # % Improvers
+            pct_imp = row_data.get("% Improvers", 0) or 0
+            if pct_imp >= 55:
+                pct_sf = workbook.add_format({"bg_color": C["green_light"], "font_color": C["green"],
+                                               "bold": True, "num_format": "0.0\"%\"",
+                                               "align": "center", "font_name": "Arial"})
+            elif pct_imp < 35:
+                pct_sf = workbook.add_format({"bg_color": C["red_light"], "font_color": C["red"],
+                                               "bold": True, "num_format": "0.0\"%\"",
+                                               "align": "center", "font_name": "Arial"})
+            else:
+                pct_sf = workbook.add_format({"bg_color": C["amber_light"], "font_color": C["amber"],
+                                               "num_format": "0.0\"%\"",
+                                               "align": "center", "font_name": "Arial"})
+            ws_exec.write(er, 7, pct_imp, pct_sf)
             ws_exec.write(er, 8, dir_str, dir_fmt)
 
+    # ── Post-only metric rows (e.g. Y9 Camp Readiness — no pre-camp baseline)
+    po_extra = 0
+    if post_only_scores:
+        for po_name, po_data in post_only_scores.items():
+            er = 10 + len(avg_df) + po_extra
+            ws_exec.set_row(er, 16)
+            po_base_fmt = workbook.add_format({
+                "bg_color": C["teal_light"], "font_name": "Arial", "font_size": 10,
+                "border_color": "#E5E7EB", "border": 1
+            })
+            po_num_fmt = workbook.add_format({
+                "bg_color": C["teal_light"], "font_name": "Arial", "font_size": 10,
+                "num_format": "0.0", "align": "center",
+                "border_color": "#E5E7EB", "border": 1
+            })
+            po_tag_fmt = workbook.add_format({
+                "bg_color": C["teal_light"], "font_color": C["teal"], "font_name": "Arial",
+                "font_size": 9, "italic": True, "align": "center",
+                "border_color": "#E5E7EB", "border": 1
+            })
+            ws_exec.write(er, 1, f"★  {po_name}", po_base_fmt)
+            ws_exec.write(er, 2, "—", po_tag_fmt)
+            ws_exec.write(er, 3, po_data["avg"], po_num_fmt)
+            ws_exec.merge_range(er, 4, er, 7,
+                                "Post-camp score only  (no pre-camp baseline)", po_tag_fmt)
+            ws_exec.write(er, 8, f"n = {po_data['n']}", po_tag_fmt)
+            po_extra += 1
+
     # Section: Qualitative snapshot
-    q_sec_row = 10 + len(avg_df) + 2
+    q_sec_row = 10 + len(avg_df) + po_extra + 2
     ws_exec.set_row(q_sec_row, 20)
     ws_exec.merge_range(q_sec_row, 1, q_sec_row, 8,
                         "  💬  Student Voice — Key Qualitative Findings", sec_fmt)
@@ -884,6 +1160,7 @@ def write_excel(output_path, tab1_df, avg_df, dist_df, breakdown_df,
         ws.write(0, i, col, F["col_hdr"])
     ws.set_column("A:A", 26)
     ws.set_column("B:D", 18)
+    ws.set_column("E:F", 18)
     for r in range(len(avg_df)):
         row_bg = C["offwhite"] if r % 2 == 0 else C["white"]
         base = workbook.add_format({"bg_color": row_bg, "font_name": "Arial",
@@ -892,8 +1169,24 @@ def write_excel(output_path, tab1_df, avg_df, dist_df, breakdown_df,
         ws.write(r+1, 0, avg_df.iloc[r, 0], label_fmt)
         ws.write_number(r+1, 1, avg_df.iloc[r, 1], base)
         ws.write_number(r+1, 2, avg_df.iloc[r, 2], base)
-        shift = avg_df.iloc[r, 3]
-        ws.write_number(r+1, 3, shift, shift_fmt(shift))
+        avg_shift = avg_df.iloc[r, 3]
+        ws.write_number(r+1, 3, avg_shift, shift_fmt(avg_shift))
+        med_shift = avg_df.iloc[r, 4] if len(avg_df.columns) > 4 else 0
+        ws.write_number(r+1, 4, med_shift, shift_fmt(med_shift))
+        pct_imp = avg_df.iloc[r, 5] if len(avg_df.columns) > 5 else 0
+        if pct_imp >= 55:
+            pct_cell_fmt = workbook.add_format({"bg_color": C["green_light"], "font_color": C["green"],
+                                                "bold": True, "num_format": "0.0\"%\"", "align": "center",
+                                                "font_name": "Arial", "font_size": 10})
+        elif pct_imp < 35:
+            pct_cell_fmt = workbook.add_format({"bg_color": C["red_light"], "font_color": C["red"],
+                                                "bold": True, "num_format": "0.0\"%\"", "align": "center",
+                                                "font_name": "Arial", "font_size": 10})
+        else:
+            pct_cell_fmt = workbook.add_format({"bg_color": C["amber_light"], "font_color": C["amber"],
+                                                "num_format": "0.0\"%\"", "align": "center",
+                                                "font_name": "Arial", "font_size": 10})
+        ws.write_number(r+1, 5, pct_imp, pct_cell_fmt)
     ws.conditional_format(f"B2:C{len(avg_df)+1}",
                           {"type": "data_bar", "bar_color": "#70AD47", "bar_only": False})
 
@@ -1139,6 +1432,156 @@ def write_excel(output_path, tab1_df, avg_df, dist_df, breakdown_df,
     if "Q8" in qual_charts: insert_chart(qual_charts["Q8"], "column", "Q8: Future Prep × Growth",   "J88", "percent_stacked")
     if "Q9" in qual_charts: insert_chart(qual_charts["Q9"], "column", "Class Experience Sentiment", "R88")
 
+    # ────────────────────────────────────────────────────────────────
+    #  🚫 NON-ATTENDERS SHEET
+    # ────────────────────────────────────────────────────────────────
+    ws_na.hide_gridlines(2)
+    ws_na.set_column("A:A", 3)
+    ws_na.set_column("B:B", 22)
+    ws_na.set_column("C:C", 22)
+    ws_na.set_column("D:D", 60)
+    ws_na.set_column("E:Z", 24)
+
+    # Title banner
+    na_title_fmt = workbook.add_format({
+        "bold": True, "font_size": 16, "font_name": "Arial",
+        "bg_color": "#7C3AED", "font_color": C["white"],
+        "align": "center", "valign": "vcenter",
+    })
+    na_sub_fmt = workbook.add_format({
+        "font_size": 10, "font_name": "Arial",
+        "bg_color": "#DDD6FE", "font_color": "#4C1D95",
+        "align": "center", "valign": "vcenter", "italic": True,
+    })
+    ws_na.merge_range("B1:I2", "🚫  Non-Attender Analysis", na_title_fmt)
+    ws_na.set_row(0, 28); ws_na.set_row(1, 28)
+    n_na = len(na_df) if na_df is not None and not na_df.empty else 0
+    ws_na.merge_range("B3:I3",
+        f"Students who did not attend camp  |  n = {n_na}  |  "
+        "Reasons & Constructive Feedback", na_sub_fmt)
+    ws_na.set_row(2, 18)
+
+    na_sec_fmt = workbook.add_format({
+        "bold": True, "font_size": 11, "font_name": "Arial",
+        "bg_color": "#7C3AED", "font_color": C["white"],
+    })
+    na_field_fmt = workbook.add_format({
+        "bold": True, "font_size": 10, "font_name": "Arial",
+        "bg_color": "#EDE9FE", "font_color": "#4C1D95", "italic": True,
+    })
+    na_wrap_fmt = workbook.add_format({
+        "text_wrap": True, "valign": "top", "font_name": "Arial", "font_size": 10,
+    })
+
+    # ── Section 1: AI Narratives
+    row_idx = 4
+    ws_na.set_row(row_idx, 20)
+    ws_na.merge_range(row_idx, 1, row_idx, 8,
+                      "  💬  AI Narrative Summaries", na_sec_fmt)
+    row_idx += 1
+
+    if na_narratives:
+        for nar in na_narratives:
+            ws_na.set_row(row_idx, 22)
+            ws_na.write(row_idx, 1, nar.get("Question", ""), F["section"])
+            ws_na.write(row_idx, 2, f"n = {nar.get('n', 0)}", F["section"])
+            for c in range(3, 9):
+                ws_na.write(row_idx, c, "", F["section"])
+            row_idx += 1
+
+            summary_text = str(nar.get("Summary", ""))
+            lines = len(summary_text.split('\n')) + (len(summary_text) // 90)
+            ws_na.set_row(row_idx, max(80, lines * 15))
+            ws_na.write(row_idx, 1, "Analysis & Quotes", na_field_fmt)
+            ws_na.write(row_idx, 2, summary_text, na_wrap_fmt)
+            row_idx += 2
+            ws_na.set_row(row_idx, 6)   # spacer
+            row_idx += 2
+    else:
+        ws_na.write(row_idx, 1,
+                    "No non-attender responses found, or AI analysis was not run.",
+                    F["skip"])
+        row_idx += 2
+
+    # ── Section 2: Coded responses table
+    ws_na.set_row(row_idx, 20)
+    ws_na.merge_range(row_idx, 1, row_idx, 8,
+                      "  📋  Coded Responses — Individual Students", na_sec_fmt)
+    row_idx += 1
+
+    if na_df is not None and not na_df.empty:
+        # Header row
+        ws_na.set_row(row_idx, 16)
+        na_col_hdr = workbook.add_format({
+            "bold": True, "bg_color": "#EDE9FE", "font_color": "#4C1D95",
+            "font_name": "Arial", "font_size": 10, "border": 1,
+            "text_wrap": True, "align": "center",
+        })
+        for ci, col_name in enumerate(na_df.columns):
+            ws_na.write(row_idx, 1 + ci, col_name, na_col_hdr)
+        row_idx += 1
+
+        # Value colour maps for NA fields
+        na_reason_colours = {
+            "Health-or-Medical":    ("#FEF3C7", "#D97706"),
+            "Family-Commitment":    ("#EDE9FE", "#5B21B6"),
+            "Financial-Cost":       ("#FEE2E2", "#C0392B"),
+            "Fear-or-Anxiety":      ("#FEE2E2", "#C0392B"),
+            "Another-School-Event": ("#D1FAE5", "#065F46"),
+            "Personal-Choice":      ("#F3F4F6", "#6B7280"),
+            "Logistical":           ("#FEF3C7", "#D97706"),
+            "Not-Specified":        ("#F9FAFB", "#9CA3AF"),
+        }
+        na_yes_fmt = workbook.add_format({
+            "bg_color": C["green_light"], "font_color": C["green"],
+            "bold": True, "font_name": "Arial", "font_size": 10,
+        })
+        na_par_fmt = workbook.add_format({
+            "bg_color": C["amber_light"], "font_color": C["amber"],
+            "font_name": "Arial", "font_size": 10,
+        })
+        na_no_fmt = workbook.add_format({
+            "bg_color": C["grey_light"], "font_color": C["grey"],
+            "font_name": "Arial", "font_size": 10,
+        })
+
+        for r in range(len(na_df)):
+            row_bg = C["offwhite"] if r % 2 == 0 else C["white"]
+            ws_na.set_row(row_idx, 15)
+            for ci, col_name in enumerate(na_df.columns):
+                val     = na_df.iloc[r, ci]
+                val_str = "" if pd.isna(val) else str(val)
+                base_f  = workbook.add_format({
+                    "bg_color": row_bg, "font_name": "Arial", "font_size": 10,
+                    "text_wrap": col_name == "Combined_Text",
+                    "valign": "top" if col_name == "Combined_Text" else "vcenter",
+                })
+                if val_str in ("No-Response", "Column-Not-Found", ""):
+                    ws_na.write(row_idx, 1 + ci, val_str, F["skip"])
+                elif val_str == "Parse-Error":
+                    ws_na.write(row_idx, 1 + ci, val_str, F["err"])
+                elif col_name == "NA_Has_Constructive":
+                    f = {"Yes": na_yes_fmt, "Partial": na_par_fmt}.get(val_str, na_no_fmt)
+                    ws_na.write(row_idx, 1 + ci, val_str, f)
+                elif col_name == "NA_Regret":
+                    f = {"Yes": na_yes_fmt, "Partial": na_par_fmt}.get(val_str, na_no_fmt)
+                    ws_na.write(row_idx, 1 + ci, val_str, f)
+                elif col_name == "NA_Reason" and val_str in na_reason_colours:
+                    bg, fg = na_reason_colours[val_str]
+                    reason_f = workbook.add_format({
+                        "bg_color": bg, "font_color": fg,
+                        "font_name": "Arial", "font_size": 10,
+                    })
+                    ws_na.write(row_idx, 1 + ci, val_str, reason_f)
+                else:
+                    ws_na.write(row_idx, 1 + ci, val_str, base_f)
+            row_idx += 1
+
+        # Freeze header row (relative to sheet start)
+        ws_na.freeze_panes(row_idx - len(na_df), 2)
+    else:
+        ws_na.write(row_idx, 1, "No non-attender data to display.", F["skip"])
+
     writer.close()
 
 
@@ -1170,7 +1613,8 @@ def _load_chartjs():
 
 
 def write_html_report(html_path, tab1_df, avg_df, dist_df, breakdown_df,
-                      coded_df, narratives, metrics_processed, mm_tables, long_df):
+                      coded_df, narratives, metrics_processed, mm_tables, long_df,
+                      post_only_scores=None, na_df=None, na_narratives=None):
     """Generate a fully self-contained, offline HTML presentation report."""
     import json as _json
 
@@ -1203,13 +1647,15 @@ def write_html_report(html_path, tab1_df, avg_df, dist_df, breakdown_df,
                 break
 
     # ── Metric chart data
-    metric_labels, pre_vals, post_vals, shift_vals = [], [], [], []
+    metric_labels, pre_vals, post_vals, shift_vals, median_shift_vals, pct_improvers_vals = [], [], [], [], [], []
     if not avg_df.empty and "Metric" in avg_df.columns:
         for _, row in avg_df.iterrows():
             metric_labels.append(str(row.get("Metric","")))
             pre_vals.append(safe_float(row.get("Pre-Camp Avg", 0)))
             post_vals.append(safe_float(row.get("Post-Camp Avg", 0)))
             shift_vals.append(safe_float(row.get("Avg Shift", 0)))
+            median_shift_vals.append(safe_float(row.get("Median Shift", 0)))
+            pct_improvers_vals.append(safe_float(row.get("% Improvers", 0)))
 
     # ── Distribution chart data
     dist_labels, improved_vals, same_vals, declined_vals = [], [], [], []
@@ -1358,24 +1804,102 @@ def write_html_report(html_path, tab1_df, avg_df, dist_df, breakdown_df,
             </div>
         </div>"""
 
+    # ── Build non-attender section HTML
+    na_section_html = ""
+    n_na_students = len(na_df) if na_df is not None and not na_df.empty else 0
+    if na_narratives:
+        for nar in na_narratives:
+            nar_label   = nar.get("Question", "Non-Attender Analysis")
+            nar_n       = nar.get("n", 0)
+            nar_summary = nar.get("Summary", "")
+            nar_analysis, nar_quotes = parse_narrative(nar_summary)
+            nar_analysis_html = "".join(
+                f"<p>{para.strip()}</p>"
+                for para in nar_analysis.split("\n\n") if para.strip()
+            )
+            nar_quotes_html = ""
+            if nar_quotes:
+                q_items = "".join(
+                    f'<blockquote class="quote-item na-quote">&ldquo;{q}&rdquo;</blockquote>'
+                    for q in nar_quotes[:5]
+                )
+                nar_quotes_html = f'<div class="quotes-block">{q_items}</div>'
+            na_section_html += f"""
+        <div class="qual-section na-section">
+            <div class="qual-header na-header">
+                <span class="q-num na-badge">🚫</span>
+                <span class="q-label">{nar_label}</span>
+                <span class="q-n">n&nbsp;=&nbsp;{nar_n}</span>
+            </div>
+            <div class="qual-body">
+                <div class="qual-left">
+                    <div class="qual-analysis">{nar_analysis_html}</div>
+                    {nar_quotes_html}
+                </div>
+                <div class="qual-charts">
+                    <p class="no-chart" style="color:#7C3AED;font-style:normal;font-size:12px">
+                        Non-attender responses coded for: reasons, regret, sentiment,
+                        and constructive feedback for future attendance.
+                    </p>
+                </div>
+            </div>
+        </div>"""
+    # ── Coded table for non-attenders (summary counts)
+    na_table_html = ""
+    if na_df is not None and not na_df.empty:
+        # Summarise each coded field as a count table
+        field_summaries = ""
+        for field in ALL_NON_ATTEND_FIELDS:
+            if field not in na_df.columns:
+                continue
+            counts = na_df[field].value_counts()
+            counts = counts[~counts.index.isin(["No-Response","Parse-Error",""])]
+            if counts.empty:
+                continue
+            rows_h = "".join(
+                f"<tr><td>{k.replace('-',' ')}</td>"
+                f"<td style='text-align:center;font-weight:700'>{v}</td>"
+                f"<td style='text-align:center;color:#6B7280'>"
+                f"{v/len(na_df)*100:.0f}%</td></tr>"
+                for k, v in counts.items()
+            )
+            field_summaries += (
+                f"<div class='na-count-block'>"
+                f"<h5 class='na-count-title'>{field.replace('_',' ')}</h5>"
+                f"<table class='mm-table'>"
+                f"<thead><tr><th>Category</th><th>Count</th><th>%</th></tr></thead>"
+                f"<tbody>{rows_h}</tbody></table></div>"
+            )
+        if field_summaries:
+            na_table_html = (
+                f'<div class="na-count-grid">{field_summaries}</div>'
+            )
+
     # ── Metric table rows
     metric_rows_html = ""
     for i, m in enumerate(metric_labels):
         pre  = pre_vals[i]
         post = post_vals[i]
         sh   = shift_vals[i]
+        med  = median_shift_vals[i] if i < len(median_shift_vals) else 0
+        pct  = pct_improvers_vals[i] if i < len(pct_improvers_vals) else 0
         arrow = "▲" if sh > 0.05 else ("▼" if sh < -0.05 else "—")
         cls   = "pos" if sh > 0.05 else ("neg" if sh < -0.05 else "zero")
+        med_arrow = "▲" if med > 0.05 else ("▼" if med < -0.05 else "—")
+        med_cls   = "pos" if med > 0.05 else ("neg" if med < -0.05 else "zero")
+        pct_cls   = "pos" if pct >= 55 else ("neg" if pct < 35 else "amber")
         bar_w = min(abs(sh) / 3.0 * 100, 100)
         metric_rows_html += (
             f"<tr>"
-            f"<td class=\'metric-name\'>{m}</td>"
-            f"<td class=\'num-cell\'>{pre:.1f}</td>"
-            f"<td class=\'num-cell\'>{post:.1f}</td>"
-            f"<td class=\'shift-cell {cls}\'>{arrow} {sh:+.2f}</td>"
-            f"<td class=\'bar-cell\'><div class=\'shift-bar {cls}\' style=\'width:{bar_w:.0f}%;min-width:2px\'></div></td>"
+            f"<td class='metric-name'>{m}</td>"
+            f"<td class='num-cell'>{pre:.1f}</td>"
+            f"<td class='num-cell'>{post:.1f}</td>"
+            f"<td class='shift-cell {cls}'>{arrow} {sh:+.2f}</td>"
+            f"<td class='shift-cell {med_cls}'>{med_arrow} {med:+.2f}</td>"
+            f"<td class='shift-cell {pct_cls}'>{pct:.1f}%</td>"
+            f"<td class='bar-cell'><div class='shift-bar {cls}' style='width:{bar_w:.0f}%;min-width:2px'></div></td>"
             f"</tr>"
-        ).replace("\'",'"')
+        ).replace("'", '"')
 
     # ── Class breakdown rows
     class_rows_html = ""
@@ -1415,6 +1939,35 @@ def write_html_report(html_path, tab1_df, avg_df, dist_df, breakdown_df,
     # Load Chart.js (embedded offline or CDN fallback)
     chartjs_tag = _load_chartjs()
 
+    # ── Y9 Camp Readiness: teal stat card + post-only metric table row
+    po_card_html = ""
+    po_metric_row_html = ""
+    if post_only_scores:
+        for po_name, po_data in post_only_scores.items():
+            po_avg = po_data["avg"]
+            po_n   = po_data["n"]
+            po_val_str = f"{po_avg:.1f}/10"
+            po_card_html += (
+                f'<div class="card teal">'
+                f'<div class="card-val">{po_val_str}</div>'
+                f'<div class="card-lbl">{po_name} &mdash; post-camp (n={po_n})</div>'
+                f'</div>'
+            )
+            bar_w = min(po_avg / 10.0 * 100, 100)
+            po_metric_row_html += (
+                f'<tr class="po-row">'
+                f'<td class="metric-name">&#9733; {po_name}</td>'
+                f'<td class="num-cell" style="color:#9CA3AF">&#8212;</td>'
+                f'<td class="num-cell">{po_avg:.1f}</td>'
+                f'<td class="shift-cell" style="color:#2E8B88;font-size:12px;font-weight:600">'
+                f'Post-only</td>'
+                f'<td class="shift-cell" style="color:#9CA3AF">&#8212;</td>'
+                f'<td class="shift-cell" style="color:#9CA3AF">&#8212;</td>'
+                f'<td class="bar-cell"><div class="shift-bar" '
+                f'style="background:#2E8B88;width:{bar_w:.0f}%;min-width:2px"></div></td>'
+                f'</tr>'
+            )
+
     html = """<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -1447,6 +2000,8 @@ body{font-family:'Segoe UI',Arial,sans-serif;background:#F0F4F8;color:#1a2332;fo
 .card.green{border-top-color:#2D7A4F}.card.green .card-val{color:#2D7A4F}
 .card.amber{border-top-color:#D97706}.card.amber .card-val{color:#D97706}
 .card.purple{border-top-color:#5B21B6}.card.purple .card-val{color:#5B21B6}
+.card.teal{border-top-color:#2E8B88}.card.teal .card-val{color:#2E8B88}
+.po-row td{background:#D4F0EF!important;font-style:italic}
 .metric-table{width:100%;border-collapse:collapse;background:white;border-radius:10px;overflow:hidden;box-shadow:0 1px 4px rgba(0,0,0,.08);margin-bottom:24px}
 .metric-table th{background:#1B3A5C;color:white;padding:12px 16px;text-align:left;font-size:12px;text-transform:uppercase;letter-spacing:.05em}
 .metric-table tr:nth-child(even) td{background:#F9FAFB}
@@ -1459,6 +2014,7 @@ body{font-family:'Segoe UI',Arial,sans-serif;background:#F0F4F8;color:#1a2332;fo
 .pos{color:#2D7A4F}.pos .shift-bar,.shift-bar.pos{background:#2D7A4F}
 .neg{color:#C0392B}.neg .shift-bar,.shift-bar.neg{background:#C0392B}
 .zero{color:#6B7280}.zero .shift-bar,.shift-bar.zero{background:#D3D3D3}
+.amber{color:#D97706;background:#FEF3C7;border-radius:4px;padding:1px 4px}
 .chart-grid{display:grid;grid-template-columns:1fr 1fr;gap:24px;margin-bottom:24px}
 .chart-box{background:white;border-radius:12px;padding:24px;box-shadow:0 1px 4px rgba(0,0,0,.08)}
 .chart-box h3{font-size:15px;font-weight:700;color:#1B3A5C;margin-bottom:16px}
@@ -1488,6 +2044,13 @@ blockquote.quote-item{background:#F0F9FF;border-left:4px solid #2E8B88;padding:1
 .mm-table th{background:#EFF6FF;padding:8px 10px;text-align:left;font-size:11px;color:#1B3A5C;border-bottom:2px solid #2E8B88}
 .mm-table td{padding:7px 10px;border-bottom:1px solid #F0F0F0}
 .mm-table .pos{color:#2D7A4F;font-weight:700}.mm-table .neg{color:#C0392B;font-weight:700}
+.na-section{border:2px solid #7C3AED}
+.na-header{background:#7C3AED!important}
+.na-badge{background:#5B21B6!important}
+blockquote.na-quote{background:#F5F3FF;border-left-color:#7C3AED}
+.na-count-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:16px;margin-bottom:24px}
+.na-count-block{background:white;border-radius:10px;padding:16px;box-shadow:0 1px 4px rgba(0,0,0,.08);border-top:3px solid #7C3AED}
+.na-count-title{font-size:11px;font-weight:700;color:#7C3AED;text-transform:uppercase;letter-spacing:.05em;margin-bottom:8px}
 .footer{text-align:center;color:#9CA3AF;font-size:12px;margin-top:48px;padding:24px}
 @media(max-width:768px){
   .hero{flex-direction:column;padding:28px 24px;gap:24px}
@@ -1508,6 +2071,7 @@ blockquote.quote-item{background:#F0F9FF;border-left:4px solid #2E8B88;padding:1
     <a href="#classes">By Class</a>
     <a href="#qualitative">Student Voice</a>
     <a href="#mixed">Insights</a>
+    <a href="#non-attenders">Non-Attenders</a>
   </div>
 </nav>
 <div class="page">
@@ -1540,6 +2104,7 @@ blockquote.quote-item{background:#F0F9FF;border-left:4px solid #2E8B88;padding:1
       <div class="card-val">""" + str(fav_pct) + """%</div>
       <div class="card-lbl">Positive on favourite part</div>
     </div>
+  """ + po_card_html + """
   </div>
 
   <h2 class="section-title" id="skills">&#128208; Skill &amp; Attitude Shifts</h2>
@@ -1548,10 +2113,12 @@ blockquote.quote-item{background:#F0F9FF;border-left:4px solid #2E8B88;padding:1
       <th>Skill / Area</th>
       <th style="text-align:center">Pre-Camp Avg</th>
       <th style="text-align:center">Post-Camp Avg</th>
-      <th style="text-align:center">Shift</th>
+      <th style="text-align:center">Mean Shift</th>
+      <th style="text-align:center">Median Shift</th>
+      <th style="text-align:center">% Improvers</th>
       <th>Change</th>
     </tr></thead>
-    <tbody>""" + metric_rows_html + """</tbody>
+    <tbody>""" + metric_rows_html + po_metric_row_html + """</tbody>
   </table>
 
   <div class="chart-grid">
@@ -1592,6 +2159,17 @@ blockquote.quote-item{background:#F0F9FF;border-left:4px solid #2E8B88;padding:1
     These tables cross-reference students&#8217; written responses with their quantitative score shifts.
   </p>
   <div class="mm-grid">""" + mm_html + """</div>
+
+  <h2 class="section-title" id="non-attenders" style="border-color:#7C3AED;color:#7C3AED">
+    &#128683; Non-Attender Analysis
+  </h2>
+  <p style="color:#6B7280;margin-bottom:20px;font-size:13px">
+    Responses from students who did <strong>not</strong> attend camp &mdash;
+    including reasons for non-attendance and constructive feedback on how the school
+    could support future participation. Total non-attenders: <strong>""" + str(n_na_students) + """</strong>.
+  </p>
+  """ + na_section_html + """
+  """ + na_table_html + """
 </div>
 <div class="footer">Camp Report """ + str(year) + """ &middot; Generated by Camp Analysis Tool &middot; Student data anonymised.</div>
 
@@ -1695,15 +2273,18 @@ def generate_report(student_path, pre_path, post_path, status_label, root):
         pre_df["Email address"]       = pre_df["Email address"].astype(str).str.strip().str.lower()
         post_df["Email address"]      = post_df["Email address"].astype(str).str.strip().str.lower()
 
-        attend_col = find_col(post_df, ["attend", "camp"])
+        attend_col    = find_col(post_df, ["attend", "camp"])
+        non_attend_df = pd.DataFrame()
         if attend_col:
-            post_df = post_df[post_df[attend_col].astype(str).str.lower().str.contains("yes", na=False)]
+            yes_mask      = post_df[attend_col].astype(str).str.lower().str.contains("yes", na=False)
+            non_attend_df = post_df[~yes_mask].copy().reset_index(drop=True)
+            post_df       = post_df[yes_mask]
 
         pre_df  = pre_df.sort_values("Timestamp").drop_duplicates("Email address", keep="last")
         post_df = post_df.sort_values("Timestamp").drop_duplicates("Email address", keep="last")
 
         status_label.config(text="Status: Processing quantitative data…", fg="blue"); root.update()
-        tab1_df, avg_df, dist_df, breakdown_df, merged_df, metrics_processed = process_quantitative(
+        tab1_df, avg_df, dist_df, breakdown_df, merged_df, metrics_processed, post_only_scores = process_quantitative(
             students, pre_df, post_df)
 
         status_label.config(text="Status: Loading AI Model…", fg="#D97706"); root.update()
@@ -1727,6 +2308,10 @@ def generate_report(student_path, pre_path, post_path, status_label, root):
                 post_df, email_list, names, surnames, classes, locations,
                 model, tokenizer, model, tokenizer, status_label, root, year)
 
+            # ── Non-attender analysis (while model is still loaded)
+            na_df, na_narratives = build_non_attend_analysis(
+                non_attend_df, model, tokenizer, status_label, root)
+
             del model, tokenizer
             gc.collect()
 
@@ -1741,20 +2326,25 @@ def generate_report(student_path, pre_path, post_path, status_label, root):
             coded_df  = pd.DataFrame([{"Error": err}])
             long_df   = pd.DataFrame([{"Note": err}])
             summary_metadata = [("SECTION", "AI Error", "", ""), ("DATA", "Error", err, "")]
-            narratives = [{"Question": "AI Status", "n": 0, "Summary": err}]
-            mm_tables  = []
-            qual_charts = {}
+            narratives    = [{"Question": "AI Status", "n": 0, "Summary": err}]
+            na_df         = pd.DataFrame()
+            na_narratives = []
+            mm_tables     = []
+            qual_charts   = {}
 
         status_label.config(text="Status: Writing Excel Report…", fg="blue"); root.update()
         xl_path = "Camp_Analysis_Report.xlsx"
         write_excel(xl_path, tab1_df, avg_df, dist_df, breakdown_df,
                     coded_df, summary_metadata, long_df, narratives,
-                    metrics_processed, mm_tables, qual_charts)
+                    metrics_processed, mm_tables, qual_charts, post_only_scores,
+                    na_df=na_df, na_narratives=na_narratives)
 
         status_label.config(text="Status: Writing HTML Report…", fg="blue"); root.update()
         html_path = "Camp_Report_Presentation.html"
         write_html_report(html_path, tab1_df, avg_df, dist_df, breakdown_df,
-                          coded_df, narratives, metrics_processed, mm_tables, long_df)
+                          coded_df, narratives, metrics_processed, mm_tables, long_df,
+                          post_only_scores,
+                          na_df=na_df, na_narratives=na_narratives)
 
         status_label.config(text="Status: Complete ✓", fg="#006100")
         messagebox.showinfo("Done",
