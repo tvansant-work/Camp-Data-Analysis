@@ -519,28 +519,36 @@ def build_qual_chart_data(long_df):
 # ═══════════════════════════════════════════════════════════════════
 
 def _find_non_attend_text_cols(df):
-    """Return up to 4 free-text columns from non-attending students."""
+    """Return up to 6 free-text columns from non-attending students."""
     priority_kw = [["reason"], ["why"], ["unable"], ["could not"],
-                   ["feedback"], ["comment"], ["suggest"], ["help"]]
+                   ["feedback"], ["comment"], ["suggest"], ["help"],
+                   ["barrier"], ["support"], ["improve"]]
     found = []
     for kws in priority_kw:
         col = find_col(df, kws)
         if col and col not in found:
             found.append(col)
-    # Catch any column that is >30% filled with non-numeric text
+    # For small groups (n < 30) use a much lower fill threshold (10%);
+    # for larger groups keep 30%.
+    min_fill = 0.10 if len(df) < 30 else 0.30
     for col in df.columns:
         if col in found:
+            continue
+        col_l = col.lower()
+        # Skip obviously non-text columns
+        if any(k in col_l for k in ("timestamp", "email", "score", "rating",
+                                     "scale", "attend", "id", "number")):
             continue
         vals = df[col].dropna().astype(str)
         if len(vals) == 0:
             continue
         text_vals = vals[vals.str.len() > 5]
-        if len(text_vals) / max(len(df), 1) < 0.3:
+        if len(text_vals) / max(len(df), 1) < min_fill:
             continue
         non_num = text_vals[~text_vals.str.fullmatch(r'[\d\.\+\-\/\:\s,]+')]
         if len(non_num) / max(len(text_vals), 1) > 0.5:
             found.append(col)
-    return found[:4]
+    return found[:6]
 
 
 def _combined_row_text(row, text_cols):
@@ -600,6 +608,13 @@ def build_non_attend_analysis(non_attend_df, model, tokenizer, status_label, roo
     classes   = non_attend_df[class_col].astype(str).tolist() if class_col else ["Unknown"] * len(non_attend_df)
 
     text_cols      = _find_non_attend_text_cols(non_attend_df)
+    # If no text columns detected, fall back to every string column except email/timestamp
+    if not text_cols:
+        text_cols = [
+            c for c in non_attend_df.columns
+            if non_attend_df[c].dtype == object
+            and not any(k in c.lower() for k in ("email", "timestamp", "id"))
+        ]
     combined_texts = [_combined_row_text(row, text_cols)
                       for _, row in non_attend_df.iterrows()]
 
@@ -1609,7 +1624,7 @@ def _load_chartjs():
             except Exception:
                 pass
     # Fallback: CDN (requires internet)
-    return '__CHARTJS_PLACEHOLDER__'
+    return '<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>'
 
 
 def write_html_report(html_path, tab1_df, avg_df, dist_df, breakdown_df,
