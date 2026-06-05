@@ -2271,6 +2271,16 @@ def write_html_report(html_path, tab1_df, avg_df, dist_df, breakdown_df,
 
         no_chart = "" if field_charts else "<p class=\'no-chart\'>Chart data populates after AI coding run.</p>".replace("\'",'"')
 
+        # ── Q4: inject Aboriginal Culture quantitative stats alongside qualitative findings
+        abcult_inject = ""
+        if qnum == 4 and abcult_stats_html:
+            abcult_inject = (
+                f'<div class="abcult-banner">'
+                f'<div class="abcult-title">&#128218; Aboriginal Culture — Quantitative Shift</div>'
+                f'{abcult_stats_html}'
+                f'</div>'
+            )
+
         qual_section_html += f"""
         <div class="qual-section">
             <div class="qual-header">
@@ -2278,6 +2288,7 @@ def write_html_report(html_path, tab1_df, avg_df, dist_df, breakdown_df,
                 <span class="q-label">{qlabel_display}</span>
                 <span class="q-n">n&nbsp;=&nbsp;{n_val}</span>
             </div>
+            {abcult_inject}
             <div class="qual-body">
                 <div class="qual-left">
                     <div class="qual-analysis">{analysis_html}</div>
@@ -2358,9 +2369,98 @@ def write_html_report(html_path, tab1_df, avg_df, dist_df, breakdown_df,
                 f'<div class="na-count-grid">{field_summaries}</div>'
             )
 
-    # ── Category summary section HTML (4 stat cards + per-category table)
+    # ── Pre-compute Aboriginal Culture metric index (used in Q4 and excluded from main table)
+    abcult_idx = next((i for i, m in enumerate(metric_labels) if m == "Aboriginal Culture"), None)
+    abcult_stats_html = ""
+    if abcult_idx is not None:
+        ac_pre   = pre_vals[abcult_idx]
+        ac_post  = post_vals[abcult_idx]
+        ac_shift = shift_vals[abcult_idx]
+        ac_pct   = pct_improvers_vals[abcult_idx] if abcult_idx < len(pct_improvers_vals) else 0
+        ac_arrow = "▲" if ac_shift > 0.05 else ("▼" if ac_shift < -0.05 else "—")
+        ac_cls   = "pos" if ac_shift > 0.05 else ("neg" if ac_shift < -0.05 else "zero")
+        abcult_stats_html = (
+            f'<div class="abcult-stats">'
+            f'<div class="abcult-stat"><div class="abcult-val">{ac_pre:.1f}</div>'
+            f'<div class="abcult-lbl">Pre-camp avg</div></div>'
+            f'<div class="abcult-stat"><div class="abcult-val">{ac_post:.1f}</div>'
+            f'<div class="abcult-lbl">Post-camp avg</div></div>'
+            f'<div class="abcult-stat"><div class="abcult-val {ac_cls}">{ac_arrow} {ac_shift:+.2f}</div>'
+            f'<div class="abcult-lbl">Avg shift</div></div>'
+            f'<div class="abcult-stat"><div class="abcult-val">{ac_pct:.0f}%</div>'
+            f'<div class="abcult-lbl">Students improved</div></div>'
+            f'</div>'
+        )
+
+    # ── Filter Aboriginal Culture from main metric chart data (shown in Q4 instead)
+    chart_filter = [i for i, m in enumerate(metric_labels) if m != "Aboriginal Culture"]
+    chart_labels      = [metric_labels[i] for i in chart_filter]
+    chart_pre         = [pre_vals[i]       for i in chart_filter]
+    chart_post        = [post_vals[i]      for i in chart_filter]
+    chart_shift       = [shift_vals[i]     for i in chart_filter]
+    chart_dist_lbl    = [dist_labels[i]    for i in chart_filter]
+    chart_improved    = [improved_vals[i]  for i in chart_filter]
+    chart_same        = [same_vals[i]      for i in chart_filter]
+    chart_declined    = [declined_vals[i]  for i in chart_filter]
+    chart_shift_cols  = [("#2D7A4F" if v > 0.05 else "#C0392B" if v < -0.05 else "#9CA3AF")
+                         for v in chart_shift]
+    # Dynamic canvas height: 36px per metric, minimum 280px
+    chart_h = max(280, len(chart_labels) * 36)
+
+    # ── Grouped metric table: Activity Skills, Camping Skills, Attitudes only
+    # Knowledge (Aboriginal Culture) moves to the Q4 section below.
+    metric_rows_html = ""
+    for cat in CATEGORY_ORDER:
+        if cat == "Knowledge":
+            continue   # Aboriginal Culture lives with Q4 First Nations section
+        cat_metrics_in_avg = [(i, row) for i, row in enumerate(metric_labels)
+                              if row in METRIC_CATEGORIES.get(cat, [])]
+        if not cat_metrics_in_avg:
+            continue
+        cat_colour_hex = CATEGORY_COLOURS.get(cat, "#2E8B88")
+        cat_light_hex  = CATEGORY_LIGHT_COLOURS.get(cat, "#D4F0EF")
+        cat_icon       = CATEGORY_ICONS.get(cat, "")
+        # ── Category header: background on the <td> so CSS tr:nth-child can't override it
+        metric_rows_html += (
+            f'<tr>'
+            f'<td colspan="7" style="background:{cat_colour_hex};color:#ffffff;'
+            f'font-weight:700;font-size:13px;padding:10px 16px;'
+            f'letter-spacing:.04em;border-bottom:2px solid rgba(0,0,0,.1)">'
+            f'{cat_icon}&nbsp;&nbsp;{cat}</td></tr>'
+        )
+        for i, m in cat_metrics_in_avg:
+            pre  = pre_vals[i]
+            post = post_vals[i]
+            sh   = shift_vals[i]
+            med  = median_shift_vals[i] if i < len(median_shift_vals) else 0
+            pct  = pct_improvers_vals[i] if i < len(pct_improvers_vals) else 0
+            arrow     = "▲" if sh > 0.05 else ("▼" if sh < -0.05 else "—")
+            cls       = "pos" if sh > 0.05 else ("neg" if sh < -0.05 else "zero")
+            med_arrow = "▲" if med > 0.05 else ("▼" if med < -0.05 else "—")
+            med_cls   = "pos" if med > 0.05 else ("neg" if med < -0.05 else "zero")
+            # % Improvers: colour-coded text only, row background handles cell bg
+            pct_color = "#2D7A4F" if pct >= 55 else ("#C0392B" if pct < 35 else "#D97706")
+            bar_w     = min(abs(sh) / 3.0 * 100, 100)
+            # Apply category light colour directly to every <td> so nth-child can't override
+            bg = f"background:{cat_light_hex};"
+            metric_rows_html += (
+                f'<tr>'
+                f'<td class="metric-name" style="{bg}padding-left:28px">{m}</td>'
+                f'<td class="num-cell" style="{bg}">{pre:.1f}</td>'
+                f'<td class="num-cell" style="{bg}">{post:.1f}</td>'
+                f'<td class="shift-cell {cls}" style="{bg}">{arrow} {sh:+.2f}</td>'
+                f'<td class="shift-cell {med_cls}" style="{bg}">{med_arrow} {med:+.2f}</td>'
+                f'<td class="num-cell" style="{bg}font-weight:700;color:{pct_color}">{pct:.1f}%</td>'
+                f'<td class="bar-cell" style="{bg}">'
+                f'<div class="shift-bar {cls}" style="width:{bar_w:.0f}%;min-width:2px"></div></td>'
+                f'</tr>'
+            ).replace("'", '"')
+
+    # ── Category summary stat cards (3 domains, Aboriginal Culture shown separately in Q4)
     cat_cards_html = ""
     for cs in cat_summary_cards:
+        if cs["cat"] == "Knowledge":
+            continue   # shown in Q4 section
         sh = cs["avg_shift"]
         arrow = "▲" if sh > 0.05 else ("▼" if sh < -0.05 else "—")
         sign_cls = "pos" if sh > 0.05 else ("neg" if sh < -0.05 else "zero")
@@ -2371,47 +2471,6 @@ def write_html_report(html_path, tab1_df, avg_df, dist_df, breakdown_df,
             f'<div class="card-sub">{cs["pct_imp"]:.0f}% of students improved</div>'
             f'</div>'
         )
-
-    # ── Grouped metric table: one section per category
-    metric_rows_html = ""
-    for cat in CATEGORY_ORDER:
-        cat_metrics_in_avg = [(i, row) for i, row in enumerate(metric_labels)
-                              if row in METRIC_CATEGORIES.get(cat, [])]
-        if not cat_metrics_in_avg:
-            continue
-        cat_colour_hex  = CATEGORY_COLOURS.get(cat, "#2E8B88")
-        cat_light_hex   = CATEGORY_LIGHT_COLOURS.get(cat, "#D4F0EF")
-        cat_icon        = CATEGORY_ICONS.get(cat, "")
-        # Category section header row
-        metric_rows_html += (
-            f'<tr class="cat-header-row" style="background:{cat_colour_hex}">'
-            f'<td colspan="7" style="color:#fff;font-weight:700;font-size:13px;'
-            f'padding:10px 16px;letter-spacing:.04em">'
-            f'{cat_icon}&nbsp;&nbsp;{cat}</td></tr>'
-        )
-        for i, m in cat_metrics_in_avg:
-            pre  = pre_vals[i]
-            post = post_vals[i]
-            sh   = shift_vals[i]
-            med  = median_shift_vals[i] if i < len(median_shift_vals) else 0
-            pct  = pct_improvers_vals[i] if i < len(pct_improvers_vals) else 0
-            arrow = "▲" if sh > 0.05 else ("▼" if sh < -0.05 else "—")
-            cls   = "pos" if sh > 0.05 else ("neg" if sh < -0.05 else "zero")
-            med_arrow = "▲" if med > 0.05 else ("▼" if med < -0.05 else "—")
-            med_cls   = "pos" if med > 0.05 else ("neg" if med < -0.05 else "zero")
-            pct_cls   = "pos" if pct >= 55 else ("neg" if pct < 35 else "amber")
-            bar_w = min(abs(sh) / 3.0 * 100, 100)
-            metric_rows_html += (
-                f'<tr style="background:{cat_light_hex}">'
-                f'<td class="metric-name" style="padding-left:28px">{m}</td>'
-                f'<td class="num-cell">{pre:.1f}</td>'
-                f'<td class="num-cell">{post:.1f}</td>'
-                f'<td class="shift-cell {cls}">{arrow} {sh:+.2f}</td>'
-                f'<td class="shift-cell {med_cls}">{med_arrow} {med:+.2f}</td>'
-                f'<td class="shift-cell {pct_cls}">{pct:.1f}%</td>'
-                f'<td class="bar-cell"><div class="shift-bar {cls}" style="width:{bar_w:.0f}%;min-width:2px"></div></td>'
-                f'</tr>'
-            ).replace("'", '"')
 
     # ── Class breakdown rows
     class_rows_html = ""
@@ -2516,7 +2575,6 @@ body{font-family:'Segoe UI',Arial,sans-serif;background:#F0F4F8;color:#1a2332;fo
 .po-row td{background:#D4F0EF!important;font-style:italic}
 .metric-table{width:100%;border-collapse:collapse;background:white;border-radius:10px;overflow:hidden;box-shadow:0 1px 4px rgba(0,0,0,.08);margin-bottom:24px}
 .metric-table th{background:#1B3A5C;color:white;padding:12px 16px;text-align:left;font-size:12px;text-transform:uppercase;letter-spacing:.05em}
-.metric-table tr:nth-child(even) td{background:#F9FAFB}
 .metric-table td{padding:10px 16px;border-bottom:1px solid #F0F0F0}
 .metric-name{font-weight:600}
 .num-cell{text-align:center;font-variant-numeric:tabular-nums}
@@ -2526,10 +2584,17 @@ body{font-family:'Segoe UI',Arial,sans-serif;background:#F0F4F8;color:#1a2332;fo
 .pos{color:#2D7A4F}.pos .shift-bar,.shift-bar.pos{background:#2D7A4F}
 .neg{color:#C0392B}.neg .shift-bar,.shift-bar.neg{background:#C0392B}
 .zero{color:#6B7280}.zero .shift-bar,.shift-bar.zero{background:#D3D3D3}
-.amber{color:#D97706;background:#FEF3C7;border-radius:4px;padding:1px 4px}
+.amber{color:#D97706}
 .chart-grid{display:grid;grid-template-columns:1fr 1fr;gap:24px;margin-bottom:24px}
-.chart-box{background:white;border-radius:12px;padding:24px;box-shadow:0 1px 4px rgba(0,0,0,.08)}
-.chart-box h3{font-size:15px;font-weight:700;color:#1B3A5C;margin-bottom:16px}
+.chart-box{background:white;border-radius:12px;padding:24px;box-shadow:0 1px 4px rgba(0,0,0,.08);display:flex;flex-direction:column}
+.chart-box h3{font-size:15px;font-weight:700;color:#1B3A5C;margin-bottom:16px;flex-shrink:0}
+.chart-box canvas{flex:1;min-height:0}
+.abcult-banner{background:linear-gradient(135deg,#EDE9FE,#DDD6FE);border-left:4px solid #5B21B6;padding:16px 24px;margin:0}
+.abcult-title{font-size:13px;font-weight:700;color:#5B21B6;text-transform:uppercase;letter-spacing:.05em;margin-bottom:12px}
+.abcult-stats{display:flex;gap:24px;flex-wrap:wrap}
+.abcult-stat{text-align:center;background:white;border-radius:8px;padding:10px 18px;box-shadow:0 1px 3px rgba(91,33,182,.15)}
+.abcult-val{font-size:22px;font-weight:800;color:#5B21B6;line-height:1}
+.abcult-lbl{font-size:11px;color:#6B7280;margin-top:3px;text-transform:uppercase;letter-spacing:.04em}
 .breakdown-wrap{overflow-x:auto;margin-bottom:24px}
 .breakdown-table{width:100%;border-collapse:collapse;background:white;border-radius:10px;overflow:hidden;box-shadow:0 1px 4px rgba(0,0,0,.08);font-size:12px;white-space:nowrap}
 .breakdown-table th{background:#1B3A5C;color:white;padding:9px 12px;text-align:center;font-size:11px;text-transform:uppercase;letter-spacing:.04em}
@@ -2639,20 +2704,20 @@ blockquote.na-quote{background:#F5F3FF;border-left-color:#7C3AED}
   </table>
 
   <div class="chart-grid">
-    <div class="chart-box">
+    <div class="chart-box" style="min-height:""" + str(chart_h + 80) + """px">
       <h3>Score Shift by Skill (post &#8722; pre)</h3>
-      <canvas id="shift-chart"></canvas>
+      <canvas id="shift-chart" style="height:""" + str(chart_h) + """px"></canvas>
     </div>
-    <div class="chart-box">
+    <div class="chart-box" style="min-height:""" + str(chart_h + 80) + """px">
       <h3>Who Improved, Stayed Same, or Declined?</h3>
-      <canvas id="dist-chart"></canvas>
+      <canvas id="dist-chart" style="height:""" + str(chart_h) + """px"></canvas>
     </div>
   </div>
 
   <div class="chart-grid">
-    <div class="chart-box">
+    <div class="chart-box" style="min-height:""" + str(chart_h + 80) + """px">
       <h3>Pre-Camp vs Post-Camp Average Scores</h3>
-      <canvas id="prepost-chart"></canvas>
+      <canvas id="prepost-chart" style="height:""" + str(chart_h) + """px"></canvas>
     </div>
     <div class="chart-box">
       <h3>Average Shift by Class</h3>
@@ -2692,48 +2757,61 @@ blockquote.na-quote{background:#F5F3FF;border-left-color:#7C3AED}
 
 <script>
 const PALETTE=['#2E8B88','#1B3A5C','#2D7A4F','#D97706','#5B21B6','#C0392B','#2980B9','#8E44AD','#16A085','#E67E22'];
+const TICK_FONT={size:11,family:"'Segoe UI',Arial,sans-serif"};
 
 new Chart(document.getElementById('shift-chart'),{
   type:'bar',
   data:{
-    labels:""" + _json.dumps(metric_labels) + """,
-    datasets:[{label:'Score Shift',data:""" + _json.dumps(shift_vals) + """,
-      backgroundColor:""" + shift_colours + """,borderRadius:4}]
+    labels:""" + _json.dumps(chart_labels) + """,
+    datasets:[{label:'Score Shift',data:""" + _json.dumps(chart_shift) + """,
+      backgroundColor:""" + _json.dumps(chart_shift_cols) + """,borderRadius:4}]
   },
-  options:{indexAxis:'y',responsive:true,
+  options:{indexAxis:'y',responsive:true,maintainAspectRatio:false,
+    layout:{padding:{right:8}},
     plugins:{legend:{display:false},tooltip:{callbacks:{label:c=>` ${c.parsed.x>=0?'+':''}${c.parsed.x.toFixed(2)}`}}},
-    scales:{x:{title:{display:true,text:'Change in score (post minus pre)'},grid:{color:'#F0F0F0'}},y:{grid:{display:false}}}
+    scales:{
+      x:{title:{display:true,text:'Change in score (post minus pre)',font:TICK_FONT},grid:{color:'#F0F0F0'},ticks:{font:TICK_FONT}},
+      y:{grid:{display:false},ticks:{font:TICK_FONT}}
+    }
   }
 });
 
 new Chart(document.getElementById('dist-chart'),{
   type:'bar',
   data:{
-    labels:""" + _json.dumps(dist_labels) + """,
+    labels:""" + _json.dumps(chart_dist_lbl) + """,
     datasets:[
-      {label:'Improved',data:""" + _json.dumps(improved_vals) + """,backgroundColor:'#4CAF50',borderRadius:2},
-      {label:'No Change',data:""" + _json.dumps(same_vals) + """,backgroundColor:'#D3D3D3',borderRadius:2},
-      {label:'Declined',data:""" + _json.dumps(declined_vals) + """,backgroundColor:'#FF6B6B',borderRadius:2}
+      {label:'Improved',data:""" + _json.dumps(chart_improved) + """,backgroundColor:'#4CAF50',borderRadius:2},
+      {label:'No Change',data:""" + _json.dumps(chart_same) + """,backgroundColor:'#D3D3D3',borderRadius:2},
+      {label:'Declined',data:""" + _json.dumps(chart_declined) + """,backgroundColor:'#FF6B6B',borderRadius:2}
     ]
   },
-  options:{indexAxis:'y',responsive:true,
-    plugins:{legend:{position:'top'}},
-    scales:{x:{stacked:true,max:100,title:{display:true,text:'% of students'}},y:{stacked:true,grid:{display:false}}}
+  options:{indexAxis:'y',responsive:true,maintainAspectRatio:false,
+    layout:{padding:{right:8}},
+    plugins:{legend:{position:'top',labels:{font:TICK_FONT}}},
+    scales:{
+      x:{stacked:true,max:100,title:{display:true,text:'% of students',font:TICK_FONT},ticks:{font:TICK_FONT}},
+      y:{stacked:true,grid:{display:false},ticks:{font:TICK_FONT}}
+    }
   }
 });
 
 new Chart(document.getElementById('prepost-chart'),{
   type:'bar',
   data:{
-    labels:""" + _json.dumps(metric_labels) + """,
+    labels:""" + _json.dumps(chart_labels) + """,
     datasets:[
-      {label:'Pre-Camp',data:""" + _json.dumps(pre_vals) + """,backgroundColor:'#8FAADC',borderRadius:3},
-      {label:'Post-Camp',data:""" + _json.dumps(post_vals) + """,backgroundColor:'#70AD47',borderRadius:3}
+      {label:'Pre-Camp',data:""" + _json.dumps(chart_pre) + """,backgroundColor:'#8FAADC',borderRadius:3},
+      {label:'Post-Camp',data:""" + _json.dumps(chart_post) + """,backgroundColor:'#70AD47',borderRadius:3}
     ]
   },
-  options:{indexAxis:'y',responsive:true,
-    plugins:{legend:{position:'top'}},
-    scales:{x:{min:0,max:10,title:{display:true,text:'Score (out of 10)'}},y:{grid:{display:false}}}
+  options:{indexAxis:'y',responsive:true,maintainAspectRatio:false,
+    layout:{padding:{right:8}},
+    plugins:{legend:{position:'top',labels:{font:TICK_FONT}}},
+    scales:{
+      x:{min:0,max:10,title:{display:true,text:'Score (out of 10)',font:TICK_FONT},ticks:{font:TICK_FONT}},
+      y:{grid:{display:false},ticks:{font:TICK_FONT}}
+    }
   }
 });
 
@@ -2745,9 +2823,13 @@ new Chart(document.getElementById('class-chart'),{
     datasets:[{label:'Avg Shift',data:cShifts,
       backgroundColor:cShifts.map(v=>v>0?'#2D7A4F':v<0?'#C0392B':'#D3D3D3'),borderRadius:4}]
   },
-  options:{responsive:true,
+  options:{responsive:true,maintainAspectRatio:false,
+    layout:{padding:{top:4}},
     plugins:{legend:{display:false}},
-    scales:{y:{title:{display:true,text:'Avg Shift'},grid:{color:'#F0F0F0'}},x:{grid:{display:false}}}
+    scales:{
+      y:{title:{display:true,text:'Avg Shift',font:TICK_FONT},grid:{color:'#F0F0F0'},ticks:{font:TICK_FONT}},
+      x:{grid:{display:false},ticks:{font:TICK_FONT}}
+    }
   }
 });
 
@@ -2763,9 +2845,14 @@ Object.entries(qualData).forEach(([field,d])=>{
     type:'bar',
     data:{labels:d.labels,datasets:[{data:d.data,backgroundColor:PALETTE.slice(0,d.data.length),borderRadius:3}]},
     options:{
-      indexAxis:'y',responsive:true,
+      indexAxis:'y',responsive:true,maintainAspectRatio:false,
       plugins:{legend:{display:false},tooltip:{callbacks:{label:c=>` ${c.parsed.x} students`}}},
-      scales:{x:{grid:{color:\'#F0F0F0\'},ticks:{font:{size:9}}},y:{grid:{display:false},ticks:{font:{size:9},callback:function(value){const lbl=this.getLabelForValue(value);return lbl.length>20?lbl.substring(0,18)+'…':lbl;}}}} }
+      scales:{
+        x:{grid:{color:'#F0F0F0'},ticks:{font:{size:10}}},
+        y:{grid:{display:false},ticks:{font:{size:10},
+          callback:function(value){const lbl=this.getLabelForValue(value);return lbl.length>22?lbl.substring(0,20)+'…':lbl;}}}
+      }
+    }
   });
 });
 </script>
@@ -2849,14 +2936,16 @@ def generate_report(student_path, pre_path, post_path, status_label, root):
             qual_charts   = {}
 
         status_label.config(text="Status: Writing Excel Report…", fg="blue"); root.update()
-        xl_path = "Camp_Analysis_Report.xlsx"
+        docs_dir = os.path.join(os.path.expanduser("~"), "Documents")
+        os.makedirs(docs_dir, exist_ok=True)
+        xl_path = os.path.join(docs_dir, "Camp_Analysis_Report.xlsx")
         write_excel(xl_path, tab1_df, avg_df, dist_df, breakdown_df,
                     coded_df, summary_metadata, long_df, narratives,
                     metrics_processed, mm_tables, qual_charts, post_only_scores,
                     na_df=na_df, na_narratives=na_narratives)
 
         status_label.config(text="Status: Writing HTML Report…", fg="blue"); root.update()
-        html_path = "Camp_Report_Presentation.html"
+        html_path = os.path.join(docs_dir, "Camp_Report_Presentation.html")
         write_html_report(html_path, tab1_df, avg_df, dist_df, breakdown_df,
                           coded_df, narratives, metrics_processed, mm_tables, long_df,
                           post_only_scores,
@@ -2933,7 +3022,7 @@ def setup_gui():
                   files["student"], files["pre"], files["post"], status, root)
               ).pack(pady=4, fill="x", padx=30)
 
-    tk.Label(root, text="Generates: Camp_Analysis_Report.xlsx  +  Camp_Report_Presentation.html",
+    tk.Label(root, text="Generates: ~/Documents/Camp_Analysis_Report.xlsx  +  Camp_Report_Presentation.html",
              font=("Arial", 8), fg="#9CA3AF", bg="#F8FAFC").pack(pady=(4,0))
     tk.Label(root, text="⚡ Fully offline — place chartjs.min.js in the same folder for offline charts",
              font=("Arial", 8), fg="#2E8B88", bg="#F8FAFC").pack(pady=(0,6))
