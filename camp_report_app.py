@@ -2226,6 +2226,44 @@ def write_html_report(html_path, tab1_df, avg_df, dist_df, breakdown_df,
 
         return analysis, quotes
 
+    # ── Pre-compute Aboriginal Culture metric index (needed in qual loop for Q4)
+    abcult_idx = next((i for i, m in enumerate(metric_labels) if m == "Aboriginal Culture"), None)
+    abcult_stats_html = ""
+    if abcult_idx is not None:
+        ac_pre   = pre_vals[abcult_idx]
+        ac_post  = post_vals[abcult_idx]
+        ac_shift = shift_vals[abcult_idx]
+        ac_pct   = pct_improvers_vals[abcult_idx] if abcult_idx < len(pct_improvers_vals) else 0
+        ac_arrow = "▲" if ac_shift > 0.05 else ("▼" if ac_shift < -0.05 else "—")
+        ac_cls   = "pos" if ac_shift > 0.05 else ("neg" if ac_shift < -0.05 else "zero")
+        abcult_stats_html = (
+            f'<div class="abcult-stats">'
+            f'<div class="abcult-stat"><div class="abcult-val">{ac_pre:.1f}</div>'
+            f'<div class="abcult-lbl">Pre-camp avg</div></div>'
+            f'<div class="abcult-stat"><div class="abcult-val">{ac_post:.1f}</div>'
+            f'<div class="abcult-lbl">Post-camp avg</div></div>'
+            f'<div class="abcult-stat"><div class="abcult-val {ac_cls}">{ac_arrow} {ac_shift:+.2f}</div>'
+            f'<div class="abcult-lbl">Avg shift</div></div>'
+            f'<div class="abcult-stat"><div class="abcult-val">{ac_pct:.0f}%</div>'
+            f'<div class="abcult-lbl">Students improved</div></div>'
+            f'</div>'
+        )
+
+    # ── Filter Aboriginal Culture from main metric chart data (shown in Q4 instead)
+    chart_filter  = [i for i, m in enumerate(metric_labels) if m != "Aboriginal Culture"]
+    chart_labels  = [metric_labels[i] for i in chart_filter]
+    chart_pre     = [pre_vals[i]       for i in chart_filter]
+    chart_post    = [post_vals[i]      for i in chart_filter]
+    chart_shift   = [shift_vals[i]     for i in chart_filter]
+    chart_dist_lbl  = [dist_labels[i]   for i in chart_filter]
+    chart_improved  = [improved_vals[i] for i in chart_filter]
+    chart_same      = [same_vals[i]     for i in chart_filter]
+    chart_declined  = [declined_vals[i] for i in chart_filter]
+    chart_shift_cols = [("#2D7A4F" if v > 0.05 else "#C0392B" if v < -0.05 else "#9CA3AF")
+                        for v in chart_shift]
+    # Dynamic canvas height: 36px per metric, minimum 280px
+    chart_h = max(280, len(chart_labels) * 36)
+
     # ── Build qual sections HTML
     qual_section_html = ""
     for nar in narratives:
@@ -2368,44 +2406,6 @@ def write_html_report(html_path, tab1_df, avg_df, dist_df, breakdown_df,
             na_table_html = (
                 f'<div class="na-count-grid">{field_summaries}</div>'
             )
-
-    # ── Pre-compute Aboriginal Culture metric index (used in Q4 and excluded from main table)
-    abcult_idx = next((i for i, m in enumerate(metric_labels) if m == "Aboriginal Culture"), None)
-    abcult_stats_html = ""
-    if abcult_idx is not None:
-        ac_pre   = pre_vals[abcult_idx]
-        ac_post  = post_vals[abcult_idx]
-        ac_shift = shift_vals[abcult_idx]
-        ac_pct   = pct_improvers_vals[abcult_idx] if abcult_idx < len(pct_improvers_vals) else 0
-        ac_arrow = "▲" if ac_shift > 0.05 else ("▼" if ac_shift < -0.05 else "—")
-        ac_cls   = "pos" if ac_shift > 0.05 else ("neg" if ac_shift < -0.05 else "zero")
-        abcult_stats_html = (
-            f'<div class="abcult-stats">'
-            f'<div class="abcult-stat"><div class="abcult-val">{ac_pre:.1f}</div>'
-            f'<div class="abcult-lbl">Pre-camp avg</div></div>'
-            f'<div class="abcult-stat"><div class="abcult-val">{ac_post:.1f}</div>'
-            f'<div class="abcult-lbl">Post-camp avg</div></div>'
-            f'<div class="abcult-stat"><div class="abcult-val {ac_cls}">{ac_arrow} {ac_shift:+.2f}</div>'
-            f'<div class="abcult-lbl">Avg shift</div></div>'
-            f'<div class="abcult-stat"><div class="abcult-val">{ac_pct:.0f}%</div>'
-            f'<div class="abcult-lbl">Students improved</div></div>'
-            f'</div>'
-        )
-
-    # ── Filter Aboriginal Culture from main metric chart data (shown in Q4 instead)
-    chart_filter = [i for i, m in enumerate(metric_labels) if m != "Aboriginal Culture"]
-    chart_labels      = [metric_labels[i] for i in chart_filter]
-    chart_pre         = [pre_vals[i]       for i in chart_filter]
-    chart_post        = [post_vals[i]      for i in chart_filter]
-    chart_shift       = [shift_vals[i]     for i in chart_filter]
-    chart_dist_lbl    = [dist_labels[i]    for i in chart_filter]
-    chart_improved    = [improved_vals[i]  for i in chart_filter]
-    chart_same        = [same_vals[i]      for i in chart_filter]
-    chart_declined    = [declined_vals[i]  for i in chart_filter]
-    chart_shift_cols  = [("#2D7A4F" if v > 0.05 else "#C0392B" if v < -0.05 else "#9CA3AF")
-                         for v in chart_shift]
-    # Dynamic canvas height: 36px per metric, minimum 280px
-    chart_h = max(280, len(chart_labels) * 36)
 
     # ── Grouped metric table: Activity Skills, Camping Skills, Attitudes only
     # Knowledge (Aboriginal Culture) moves to the Q4 section below.
