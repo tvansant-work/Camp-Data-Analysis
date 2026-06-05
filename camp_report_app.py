@@ -801,6 +801,59 @@ POST_ONLY_METRICS = {
     "Y9 Camp Readiness": ["7 day camp", "year 9"],   # post-camp col 28
 }
 
+# ── Category groupings ───────────────────────────────────────────────
+# Groups all METRIC_MAP keys into four reporting categories.
+# Camping Skills is a sub-category of skills but reported separately.
+METRIC_CATEGORIES = {
+    "Activity Skills": ["Mountain Biking", "Biking Comfort", "Coasteering",
+                        "Swimming", "Sea Kayaking", "Overnight Hike", "Snorkelling"],
+    "Camping Skills":  ["Camping Skills", "Sleeping Outdoors"],
+    "Attitudes":       ["Teamwork", "Autonomy", "Drive"],
+    "Knowledge":       ["Aboriginal Culture"],
+}
+CATEGORY_ORDER = ["Activity Skills", "Camping Skills", "Attitudes", "Knowledge"]
+CATEGORY_COLOURS = {
+    "Activity Skills": "#2E8B88",   # teal
+    "Camping Skills":  "#2D7A4F",   # green
+    "Attitudes":       "#D97706",   # amber
+    "Knowledge":       "#5B21B6",   # purple
+}
+CATEGORY_LIGHT_COLOURS = {
+    "Activity Skills": "#D4F0EF",
+    "Camping Skills":  "#C8EDD9",
+    "Attitudes":       "#FEF3C7",
+    "Knowledge":       "#EDE9FE",
+}
+CATEGORY_ICONS = {
+    "Activity Skills": "🏄",
+    "Camping Skills":  "⛺",
+    "Attitudes":       "💪",
+    "Knowledge":       "📚",
+}
+
+def get_metric_category(metric_name):
+    """Return the reporting category for a given metric name."""
+    for cat, metrics in METRIC_CATEGORIES.items():
+        if metric_name in metrics:
+            return cat
+    return "Other"
+
+def build_category_summary(avg_df, metrics_processed):
+    """Compute per-category avg shift, median shift, and % improvers from avg_df."""
+    rows = []
+    for cat in CATEGORY_ORDER:
+        cat_rows = avg_df[avg_df["Metric"].isin(METRIC_CATEGORIES.get(cat, []))]
+        if cat_rows.empty:
+            continue
+        rows.append({
+            "Category":       cat,
+            "Avg Shift":      round(float(cat_rows["Avg Shift"].mean()), 2),
+            "Median Shift":   round(float(cat_rows["Median Shift"].mean()), 2),
+            "% Improvers":    round(float(cat_rows["% Improvers"].mean()), 1),
+            "Metrics Tracked": len(cat_rows),
+        })
+    return pd.DataFrame(rows)
+
 def process_quantitative(students_df, pre_df, post_df):
     post_emails = post_df["Email address"].dropna().unique()
     students_df = students_df[students_df["Email"].isin(post_emails)]
@@ -1017,6 +1070,7 @@ def write_excel(output_path, tab1_df, avg_df, dist_df, breakdown_df,
     ws_high = workbook.add_worksheet("Qual Highlights")
     ws_mm   = workbook.add_worksheet("Mixed Methods")
     ws_na   = workbook.add_worksheet("🚫 Non-Attenders")
+    ws_cat  = workbook.add_worksheet("📂 Category Summary")
 
     coded_df.to_excel(writer, sheet_name="Qual Responses", index=False, na_rep="—")
     long_df.to_excel(writer,  sheet_name="Longitudinal Data", index=False, na_rep="—")
@@ -1025,15 +1079,16 @@ def write_excel(output_path, tab1_df, avg_df, dist_df, breakdown_df,
     ws_cdraw = workbook.add_worksheet("_ChartData")
     ws_qcd   = workbook.add_worksheet("_QualChartData")
     ws_cdraw.hide(); ws_qcd.hide(); ws_dash.hide()
-    writer.sheets["Qual Summary"]     = ws_sum
-    writer.sheets["Qual Highlights"]  = ws_high
-    writer.sheets["Mixed Methods"]    = ws_mm
-    writer.sheets["🚫 Non-Attenders"] = ws_na
-    writer.sheets["Qual Responses"]   = writer.sheets["Qual Responses"]
-    writer.sheets["Longitudinal Data"]= writer.sheets["Longitudinal Data"]
-    writer.sheets["_QualDash"]        = ws_dash
-    writer.sheets["_ChartData"]       = ws_cdraw
-    writer.sheets["_QualChartData"]   = ws_qcd
+    writer.sheets["Qual Summary"]        = ws_sum
+    writer.sheets["Qual Highlights"]     = ws_high
+    writer.sheets["Mixed Methods"]       = ws_mm
+    writer.sheets["🚫 Non-Attenders"]   = ws_na
+    writer.sheets["📂 Category Summary"] = ws_cat
+    writer.sheets["Qual Responses"]      = writer.sheets["Qual Responses"]
+    writer.sheets["Longitudinal Data"]   = writer.sheets["Longitudinal Data"]
+    writer.sheets["_QualDash"]           = ws_dash
+    writer.sheets["_ChartData"]          = ws_cdraw
+    writer.sheets["_QualChartData"]      = ws_qcd
 
     # ────────────────────────────────────────────────────────────────
     #  📊 EXECUTIVE SUMMARY SHEET
@@ -1078,13 +1133,13 @@ def write_excel(output_path, tab1_df, avg_df, dist_df, breakdown_df,
     write_stat_card(ws_exec, 4, 7, "Locations", str(len(locs_list)), " & ".join(locs_list[:3]) if locs_list else "—",
                     bg="#EDE9FE", font_col="#5B21B6")
 
-    # Section: Quantitative highlights
+    # Section: Quantitative highlights — now grouped by category
     ws_exec.set_row(8, 20)
     sec_fmt = workbook.add_format({"bold": True, "font_size": 11, "font_name": "Arial",
                                    "bg_color": C["navy"], "font_color": C["white"]})
-    ws_exec.merge_range("B9:I9", "  📐  Skill & Attitude Shifts  (average change, pre → post camp)", sec_fmt)
+    ws_exec.merge_range("B9:I9", "  📐  Skill & Attitude Shifts by Category  (average change, pre → post camp)", sec_fmt)
 
-    # Mini table: metric shifts with inline colour bar
+    # Mini table: metric shifts grouped by category
     if not avg_df.empty and "Metric" in avg_df.columns:
         ws_exec.set_row(9, 16)
         hdr_fmt = workbook.add_format({"bold": True, "bg_color": C["grey_light"],
@@ -1097,75 +1152,100 @@ def write_excel(output_path, tab1_df, avg_df, dist_df, breakdown_df,
         ws_exec.write(9, 7, "% Improvers",     hdr_fmt)
         ws_exec.write(9, 8, "Direction",        hdr_fmt)
 
-        for ri, row_data in avg_df.iterrows():
-            er = 10 + ri
-            ws_exec.set_row(er, 16)
-            row_bg = C["offwhite"] if ri % 2 == 0 else C["white"]
-            base_fmt = workbook.add_format({"bg_color": row_bg, "font_name": "Arial",
-                                             "font_size": 10, "border_color": "#E5E7EB", "border": 1})
-            num_fmt  = workbook.add_format({"bg_color": row_bg, "font_name": "Arial",
-                                             "font_size": 10, "num_format": "0.0", "align": "center",
-                                             "border_color": "#E5E7EB", "border": 1})
-            shift    = row_data.get("Avg Shift", 0) or 0
-            if shift > 0.05:
-                sf = workbook.add_format({"bg_color": C["green_light"], "font_color": C["green"],
-                                           "bold": True, "num_format": "+0.0;-0.0;0.0",
-                                           "align": "center", "font_name": "Arial"})
-                dir_str = "▲ Improved"
-                dir_col = C["green"]
-            elif shift < -0.05:
-                sf = workbook.add_format({"bg_color": C["red_light"], "font_color": C["red"],
-                                           "bold": True, "num_format": "+0.0;-0.0;0.0",
-                                           "align": "center", "font_name": "Arial"})
-                dir_str = "▼ Declined"
-                dir_col = C["red"]
-            else:
-                sf = num_fmt
-                dir_str = "— Same"
-                dir_col = C["grey"]
-            dir_fmt = workbook.add_format({"bg_color": row_bg, "font_color": dir_col,
-                                            "font_name": "Arial", "font_size": 9,
-                                            "align": "center", "border_color": "#E5E7EB", "border": 1})
-            ws_exec.write(er, 1, row_data.get("Metric", ""), base_fmt)
-            ws_exec.write(er, 2, row_data.get("Pre-Camp Avg", ""), num_fmt)
-            ws_exec.write(er, 3, row_data.get("Post-Camp Avg", ""), num_fmt)
-            ws_exec.merge_range(er, 4, er, 5, shift, sf)
-            # Median Shift
-            med = row_data.get("Median Shift", 0) or 0
-            if med > 0.05:
-                med_sf = workbook.add_format({"bg_color": C["green_light"], "font_color": C["green"],
+        er = 10  # current excel row
+        for cat in CATEGORY_ORDER:
+            cat_metrics_in_data = [r for _, r in avg_df.iterrows()
+                                   if r.get("Metric","") in METRIC_CATEGORIES.get(cat, [])]
+            if not cat_metrics_in_data:
+                continue
+            # ── Category header row
+            cat_colour  = CATEGORY_COLOURS.get(cat, C["teal"])
+            cat_light   = CATEGORY_LIGHT_COLOURS.get(cat, C["teal_light"])
+            cat_hdr_fmt = workbook.add_format({
+                "bold": True, "font_size": 10, "font_name": "Arial",
+                "bg_color": cat_colour, "font_color": "#FFFFFF", "border": 1,
+            })
+            cat_avg_shift = sum(r.get("Avg Shift", 0) or 0 for r in cat_metrics_in_data) / len(cat_metrics_in_data)
+            cat_dir = "▲ Better" if cat_avg_shift > 0.05 else ("▼ Declined" if cat_avg_shift < -0.05 else "— Same")
+            ws_exec.set_row(er, 18)
+            ws_exec.write(er, 1, f"{CATEGORY_ICONS.get(cat, '')}  {cat}", cat_hdr_fmt)
+            for cc in range(2, 8):
+                ws_exec.write(er, cc, "", cat_hdr_fmt)
+            ws_exec.write(er, 8, cat_dir, cat_hdr_fmt)
+            er += 1
+
+            for ri, row_data in enumerate(cat_metrics_in_data):
+                ws_exec.set_row(er, 16)
+                row_bg  = cat_light if ri % 2 == 0 else C["white"]
+                base_fmt = workbook.add_format({"bg_color": row_bg, "font_name": "Arial",
+                                                 "font_size": 10, "border_color": "#E5E7EB", "border": 1})
+                num_fmt  = workbook.add_format({"bg_color": row_bg, "font_name": "Arial",
+                                                 "font_size": 10, "num_format": "0.0", "align": "center",
+                                                 "border_color": "#E5E7EB", "border": 1})
+                shift    = row_data.get("Avg Shift", 0) or 0
+                if shift > 0.05:
+                    sf = workbook.add_format({"bg_color": C["green_light"], "font_color": C["green"],
                                                "bold": True, "num_format": "+0.0;-0.0;0.0",
                                                "align": "center", "font_name": "Arial"})
-            elif med < -0.05:
-                med_sf = workbook.add_format({"bg_color": C["red_light"], "font_color": C["red"],
+                    dir_str = "▲ Improved"
+                    dir_col = C["green"]
+                elif shift < -0.05:
+                    sf = workbook.add_format({"bg_color": C["red_light"], "font_color": C["red"],
                                                "bold": True, "num_format": "+0.0;-0.0;0.0",
                                                "align": "center", "font_name": "Arial"})
-            else:
-                med_sf = num_fmt
-            ws_exec.write(er, 6, med, med_sf)
-            # % Improvers
-            pct_imp = row_data.get("% Improvers", 0) or 0
-            if pct_imp >= 55:
-                pct_sf = workbook.add_format({"bg_color": C["green_light"], "font_color": C["green"],
-                                               "bold": True, "num_format": "0.0\"%\"",
-                                               "align": "center", "font_name": "Arial"})
-            elif pct_imp < 35:
-                pct_sf = workbook.add_format({"bg_color": C["red_light"], "font_color": C["red"],
-                                               "bold": True, "num_format": "0.0\"%\"",
-                                               "align": "center", "font_name": "Arial"})
-            else:
-                pct_sf = workbook.add_format({"bg_color": C["amber_light"], "font_color": C["amber"],
-                                               "num_format": "0.0\"%\"",
-                                               "align": "center", "font_name": "Arial"})
-            ws_exec.write(er, 7, pct_imp, pct_sf)
-            ws_exec.write(er, 8, dir_str, dir_fmt)
+                    dir_str = "▼ Declined"
+                    dir_col = C["red"]
+                else:
+                    sf = num_fmt
+                    dir_str = "— Same"
+                    dir_col = C["grey"]
+                dir_fmt = workbook.add_format({"bg_color": row_bg, "font_color": dir_col,
+                                                "font_name": "Arial", "font_size": 9,
+                                                "align": "center", "border_color": "#E5E7EB", "border": 1})
+                ws_exec.write(er, 1, "  " + row_data.get("Metric", ""), base_fmt)
+                ws_exec.write(er, 2, row_data.get("Pre-Camp Avg", ""), num_fmt)
+                ws_exec.write(er, 3, row_data.get("Post-Camp Avg", ""), num_fmt)
+                ws_exec.merge_range(er, 4, er, 5, shift, sf)
+                # Median Shift
+                med = row_data.get("Median Shift", 0) or 0
+                if med > 0.05:
+                    med_sf = workbook.add_format({"bg_color": C["green_light"], "font_color": C["green"],
+                                                   "bold": True, "num_format": "+0.0;-0.0;0.0",
+                                                   "align": "center", "font_name": "Arial"})
+                elif med < -0.05:
+                    med_sf = workbook.add_format({"bg_color": C["red_light"], "font_color": C["red"],
+                                                   "bold": True, "num_format": "+0.0;-0.0;0.0",
+                                                   "align": "center", "font_name": "Arial"})
+                else:
+                    med_sf = num_fmt
+                ws_exec.write(er, 6, med, med_sf)
+                # % Improvers
+                pct_imp = row_data.get("% Improvers", 0) or 0
+                if pct_imp >= 55:
+                    pct_sf = workbook.add_format({"bg_color": C["green_light"], "font_color": C["green"],
+                                                   "bold": True, "num_format": "0.0\"%\"",
+                                                   "align": "center", "font_name": "Arial"})
+                elif pct_imp < 35:
+                    pct_sf = workbook.add_format({"bg_color": C["red_light"], "font_color": C["red"],
+                                                   "bold": True, "num_format": "0.0\"%\"",
+                                                   "align": "center", "font_name": "Arial"})
+                else:
+                    pct_sf = workbook.add_format({"bg_color": C["amber_light"], "font_color": C["amber"],
+                                                   "num_format": "0.0\"%\"",
+                                                   "align": "center", "font_name": "Arial"})
+                ws_exec.write(er, 7, pct_imp, pct_sf)
+                ws_exec.write(er, 8, dir_str, dir_fmt)
+                er += 1
 
     # ── Post-only metric rows (e.g. Y9 Camp Readiness — no pre-camp baseline)
+    # er is already set by the category loop above; fall back if avg_df was empty
+    if avg_df.empty or "Metric" not in avg_df.columns:
+        er = 10
     po_extra = 0
     if post_only_scores:
         for po_name, po_data in post_only_scores.items():
-            er = 10 + len(avg_df) + po_extra
-            ws_exec.set_row(er, 16)
+            er_po = er + po_extra
+            ws_exec.set_row(er_po, 16)
             po_base_fmt = workbook.add_format({
                 "bg_color": C["teal_light"], "font_name": "Arial", "font_size": 10,
                 "border_color": "#E5E7EB", "border": 1
@@ -1180,16 +1260,16 @@ def write_excel(output_path, tab1_df, avg_df, dist_df, breakdown_df,
                 "font_size": 9, "italic": True, "align": "center",
                 "border_color": "#E5E7EB", "border": 1
             })
-            ws_exec.write(er, 1, f"★  {po_name}", po_base_fmt)
-            ws_exec.write(er, 2, "—", po_tag_fmt)
-            ws_exec.write(er, 3, po_data["avg"], po_num_fmt)
-            ws_exec.merge_range(er, 4, er, 7,
+            ws_exec.write(er_po, 1, f"★  {po_name}", po_base_fmt)
+            ws_exec.write(er_po, 2, "—", po_tag_fmt)
+            ws_exec.write(er_po, 3, po_data["avg"], po_num_fmt)
+            ws_exec.merge_range(er_po, 4, er_po, 7,
                                 "Post-camp score only  (no pre-camp baseline)", po_tag_fmt)
-            ws_exec.write(er, 8, f"n = {po_data['n']}", po_tag_fmt)
+            ws_exec.write(er_po, 8, f"n = {po_data['n']}", po_tag_fmt)
             po_extra += 1
 
     # Section: Qualitative snapshot
-    q_sec_row = 10 + len(avg_df) + po_extra + 2
+    q_sec_row = er + po_extra + 2
     ws_exec.set_row(q_sec_row, 20)
     ws_exec.merge_range(q_sec_row, 1, q_sec_row, 8,
                         "  💬  Student Voice — Key Qualitative Findings", sec_fmt)
@@ -1274,6 +1354,143 @@ def write_excel(output_path, tab1_df, avg_df, dist_df, breakdown_df,
                 ws.write_number(r+1, c, v, F["z_shift"])
 
     # ────────────────────────────────────────────────────────────────
+    #  📂 CATEGORY SUMMARY SHEET
+    # ────────────────────────────────────────────────────────────────
+    ws_cat.hide_gridlines(2)
+    ws_cat.set_column("A:A", 3)
+    ws_cat.set_column("B:B", 26)
+    ws_cat.set_column("C:F", 18)
+    ws_cat.set_column("G:G", 22)
+
+    cat_title_fmt = workbook.add_format({
+        "bold": True, "font_size": 16, "font_name": "Arial",
+        "bg_color": C["navy"], "font_color": C["white"],
+        "align": "center", "valign": "vcenter",
+    })
+    ws_cat.merge_range("B1:G2", "📂  Category Summary — Avg Shift by Domain", cat_title_fmt)
+    ws_cat.set_row(0, 30); ws_cat.set_row(1, 30)
+    ws_cat.merge_range("B3:G3",
+        "Grouped view: Activity Skills · Camping Skills · Attitudes · Knowledge",
+        workbook.add_format({"font_size": 10, "font_name": "Arial",
+                             "bg_color": C["teal"], "font_color": C["white"], "align": "center"}))
+    ws_cat.set_row(2, 18)
+
+    cat_col_hdr_fmt = workbook.add_format({
+        "bold": True, "bg_color": C["grey_light"], "border": 1,
+        "font_name": "Arial", "align": "center", "font_size": 10,
+    })
+    cat_row_start = 4
+    ws_cat.set_row(cat_row_start, 16)
+    ws_cat.write(cat_row_start, 1, "Category",         cat_col_hdr_fmt)
+    ws_cat.write(cat_row_start, 2, "Avg Shift",         cat_col_hdr_fmt)
+    ws_cat.write(cat_row_start, 3, "Median Shift",      cat_col_hdr_fmt)
+    ws_cat.write(cat_row_start, 4, "% Improvers",       cat_col_hdr_fmt)
+    ws_cat.write(cat_row_start, 5, "Metrics Tracked",   cat_col_hdr_fmt)
+    ws_cat.write(cat_row_start, 6, "Direction",         cat_col_hdr_fmt)
+
+    # Hidden data sheet for chart
+    ws_cat_data = workbook.add_worksheet("_CatSummaryData")
+    ws_cat_data.hide()
+    writer.sheets["_CatSummaryData"] = ws_cat_data
+
+    cat_data_row = 0
+    ws_cat_data.write(cat_data_row, 0, "Category")
+    ws_cat_data.write(cat_data_row, 1, "Avg Shift")
+    cat_data_row += 1
+
+    cat_sr = cat_row_start + 1
+    cat_chart_n = 0
+    for cat in CATEGORY_ORDER:
+        cat_rows = avg_df[avg_df["Metric"].isin(METRIC_CATEGORIES.get(cat, []))] if not avg_df.empty else pd.DataFrame()
+        if cat_rows.empty:
+            continue
+        cat_colour = CATEGORY_COLOURS.get(cat, C["teal"])
+        cat_light  = CATEGORY_LIGHT_COLOURS.get(cat, C["teal_light"])
+        cat_avg    = float(cat_rows["Avg Shift"].mean())
+        cat_med    = float(cat_rows["Median Shift"].mean()) if "Median Shift" in cat_rows.columns else 0
+        cat_pct    = float(cat_rows["% Improvers"].mean()) if "% Improvers" in cat_rows.columns else 0
+        cat_n      = len(cat_rows)
+        cat_dir    = "▲ Improved" if cat_avg > 0.05 else ("▼ Declined" if cat_avg < -0.05 else "— Same")
+
+        row_fmt = workbook.add_format({"bg_color": cat_light, "font_name": "Arial",
+                                        "font_size": 11, "border": 1, "bold": True,
+                                        "font_color": cat_colour})
+        num_fmt_c = workbook.add_format({"bg_color": cat_light, "font_name": "Arial",
+                                          "font_size": 11, "border": 1,
+                                          "num_format": "+0.00;-0.00;0.00", "align": "center",
+                                          "font_color": C["green"] if cat_avg > 0.05 else (C["red"] if cat_avg < -0.05 else C["grey"])})
+        pct_fmt_c = workbook.add_format({"bg_color": cat_light, "font_name": "Arial",
+                                          "font_size": 11, "border": 1,
+                                          "num_format": "0.0\"%\"", "align": "center"})
+        ctr_fmt_c = workbook.add_format({"bg_color": cat_light, "font_name": "Arial",
+                                          "font_size": 11, "border": 1, "align": "center"})
+        dir_fmt_c = workbook.add_format({"bg_color": cat_light, "font_name": "Arial",
+                                          "font_size": 11, "border": 1, "align": "center",
+                                          "font_color": C["green"] if cat_avg > 0.05 else (C["red"] if cat_avg < -0.05 else C["grey"]),
+                                          "bold": True})
+        ws_cat.set_row(cat_sr, 22)
+        ws_cat.write(cat_sr, 1, f"{CATEGORY_ICONS.get(cat,'')}  {cat}", row_fmt)
+        ws_cat.write(cat_sr, 2, cat_avg, num_fmt_c)
+        ws_cat.write(cat_sr, 3, cat_med, num_fmt_c)
+        ws_cat.write(cat_sr, 4, cat_pct, pct_fmt_c)
+        ws_cat.write(cat_sr, 5, cat_n,   ctr_fmt_c)
+        ws_cat.write(cat_sr, 6, cat_dir, dir_fmt_c)
+        cat_sr += 1
+
+        # Write hidden data for chart
+        ws_cat_data.write(cat_data_row, 0, cat)
+        ws_cat_data.write(cat_data_row, 1, cat_avg)
+        cat_data_row += 1
+        cat_chart_n += 1
+
+        # Per-category metric detail rows below the summary row
+        for mi, (_, mrow) in enumerate(cat_rows.iterrows()):
+            ws_cat.set_row(cat_sr, 16)
+            sub_bg  = C["offwhite"] if mi % 2 == 0 else C["white"]
+            sub_fmt = workbook.add_format({"bg_color": sub_bg, "font_name": "Arial",
+                                            "font_size": 10, "border": 1})
+            sub_num = workbook.add_format({"bg_color": sub_bg, "font_name": "Arial",
+                                            "font_size": 10, "border": 1,
+                                            "num_format": "+0.00;-0.00;0.00", "align": "center"})
+            sub_pct = workbook.add_format({"bg_color": sub_bg, "font_name": "Arial",
+                                            "font_size": 10, "border": 1,
+                                            "num_format": "0.0\"%\"", "align": "center"})
+            sub_ctr = workbook.add_format({"bg_color": sub_bg, "font_name": "Arial",
+                                            "font_size": 10, "border": 1, "align": "center"})
+            mv = float(mrow.get("Avg Shift", 0) or 0)
+            ws_cat.write(cat_sr, 1, "    → " + str(mrow.get("Metric","")), sub_fmt)
+            ws_cat.write(cat_sr, 2, mv, sub_num)
+            ws_cat.write(cat_sr, 3, float(mrow.get("Median Shift", 0) or 0), sub_num)
+            ws_cat.write(cat_sr, 4, float(mrow.get("% Improvers", 0) or 0), sub_pct)
+            ws_cat.write(cat_sr, 5, 1, sub_ctr)
+            ws_cat.write(cat_sr, 6, "▲" if mv > 0.05 else ("▼" if mv < -0.05 else "—"), sub_ctr)
+            cat_sr += 1
+
+        ws_cat.set_row(cat_sr, 6)   # spacer between categories
+        cat_sr += 1
+
+    # Category bar chart
+    if cat_chart_n > 0:
+        cat_chart = workbook.add_chart({"type": "bar"})
+        colours_list = [CATEGORY_COLOURS.get(c, C["teal"]) for c in CATEGORY_ORDER
+                        if not avg_df[avg_df["Metric"].isin(METRIC_CATEGORIES.get(c, []))].empty
+                        if not avg_df.empty]
+        cat_chart.add_series({
+            "name":       "Avg Shift",
+            "categories": ["_CatSummaryData", 1, 0, cat_chart_n, 0],
+            "values":     ["_CatSummaryData", 1, 1, cat_chart_n, 1],
+            "fill":       {"color": "#2E8B88"},
+            "data_labels": {"value": True, "num_format": "+0.00;-0.00;0.00"},
+        })
+        cat_chart.set_title({"name": "Average Shift by Category (pre → post camp)",
+                             "name_font": {"size": 14, "bold": True}})
+        cat_chart.set_x_axis({"name": "Avg Shift", "crossing": 0})
+        cat_chart.set_y_axis({"reverse": True})
+        cat_chart.set_legend({"none": True})
+        cat_chart.set_size({"width": 500, "height": 280})
+        ws_cat.insert_chart(f"B{cat_sr + 2}", cat_chart)
+
+    # ────────────────────────────────────────────────────────────────
     #  GROUP AVERAGES (cleaner with visual bars via data bars)
     # ────────────────────────────────────────────────────────────────
     ws = writer.sheets["Group Averages"]
@@ -1282,33 +1499,85 @@ def write_excel(output_path, tab1_df, avg_df, dist_df, breakdown_df,
     ws.set_column("A:A", 26)
     ws.set_column("B:D", 18)
     ws.set_column("E:F", 18)
-    for r in range(len(avg_df)):
-        row_bg = C["offwhite"] if r % 2 == 0 else C["white"]
-        base = workbook.add_format({"bg_color": row_bg, "font_name": "Arial",
-                                     "font_size": 10, "num_format": "0.0", "align": "center"})
-        label_fmt = workbook.add_format({"bg_color": row_bg, "font_name": "Arial", "font_size": 10})
-        ws.write(r+1, 0, avg_df.iloc[r, 0], label_fmt)
-        ws.write_number(r+1, 1, avg_df.iloc[r, 1], base)
-        ws.write_number(r+1, 2, avg_df.iloc[r, 2], base)
-        avg_shift = avg_df.iloc[r, 3]
-        ws.write_number(r+1, 3, avg_shift, shift_fmt(avg_shift))
-        med_shift = avg_df.iloc[r, 4] if len(avg_df.columns) > 4 else 0
-        ws.write_number(r+1, 4, med_shift, shift_fmt(med_shift))
-        pct_imp = avg_df.iloc[r, 5] if len(avg_df.columns) > 5 else 0
-        if pct_imp >= 55:
-            pct_cell_fmt = workbook.add_format({"bg_color": C["green_light"], "font_color": C["green"],
-                                                "bold": True, "num_format": "0.0\"%\"", "align": "center",
-                                                "font_name": "Arial", "font_size": 10})
-        elif pct_imp < 35:
-            pct_cell_fmt = workbook.add_format({"bg_color": C["red_light"], "font_color": C["red"],
-                                                "bold": True, "num_format": "0.0\"%\"", "align": "center",
-                                                "font_name": "Arial", "font_size": 10})
-        else:
-            pct_cell_fmt = workbook.add_format({"bg_color": C["amber_light"], "font_color": C["amber"],
-                                                "num_format": "0.0\"%\"", "align": "center",
-                                                "font_name": "Arial", "font_size": 10})
-        ws.write_number(r+1, 5, pct_imp, pct_cell_fmt)
-    ws.conditional_format(f"B2:C{len(avg_df)+1}",
+
+    # Write metrics grouped by category with coloured section headers
+    ga_r = 1
+    for cat in CATEGORY_ORDER:
+        cat_rows = [(i, r) for i, r in avg_df.iterrows()
+                    if r.get("Metric","") in METRIC_CATEGORIES.get(cat, [])]
+        if not cat_rows:
+            continue
+        cat_colour = CATEGORY_COLOURS.get(cat, C["teal"])
+        cat_hdr_f  = workbook.add_format({
+            "bold": True, "font_size": 10, "font_name": "Arial",
+            "bg_color": cat_colour, "font_color": "#FFFFFF", "border": 1,
+        })
+        # Category header spanning all columns
+        n_cols = len(avg_df.columns)
+        ws.set_row(ga_r, 18)
+        ws.write(ga_r, 0, f"{CATEGORY_ICONS.get(cat,'')}  {cat}", cat_hdr_f)
+        for cc in range(1, n_cols):
+            ws.write(ga_r, cc, "", cat_hdr_f)
+        ga_r += 1
+        for local_ri, (_, row) in enumerate(cat_rows):
+            cat_light = CATEGORY_LIGHT_COLOURS.get(cat, C["teal_light"])
+            row_bg = cat_light if local_ri % 2 == 0 else C["white"]
+            base = workbook.add_format({"bg_color": row_bg, "font_name": "Arial",
+                                         "font_size": 10, "num_format": "0.0", "align": "center"})
+            label_fmt = workbook.add_format({"bg_color": row_bg, "font_name": "Arial", "font_size": 10})
+            ws.write(ga_r, 0, row.iloc[0], label_fmt)
+            ws.write_number(ga_r, 1, row.iloc[1], base)
+            ws.write_number(ga_r, 2, row.iloc[2], base)
+            avg_shift = row.iloc[3]
+            ws.write_number(ga_r, 3, avg_shift, shift_fmt(avg_shift))
+            med_shift = row.iloc[4] if len(avg_df.columns) > 4 else 0
+            ws.write_number(ga_r, 4, med_shift, shift_fmt(med_shift))
+            pct_imp = row.iloc[5] if len(avg_df.columns) > 5 else 0
+            if pct_imp >= 55:
+                pct_cell_fmt = workbook.add_format({"bg_color": C["green_light"], "font_color": C["green"],
+                                                    "bold": True, "num_format": "0.0\"%\"", "align": "center",
+                                                    "font_name": "Arial", "font_size": 10})
+            elif pct_imp < 35:
+                pct_cell_fmt = workbook.add_format({"bg_color": C["red_light"], "font_color": C["red"],
+                                                    "bold": True, "num_format": "0.0\"%\"", "align": "center",
+                                                    "font_name": "Arial", "font_size": 10})
+            else:
+                pct_cell_fmt = workbook.add_format({"bg_color": C["amber_light"], "font_color": C["amber"],
+                                                    "num_format": "0.0\"%\"", "align": "center",
+                                                    "font_name": "Arial", "font_size": 10})
+            ws.write_number(ga_r, 5, pct_imp, pct_cell_fmt)
+            ga_r += 1
+        # Category average row
+        cat_all_shifts = [r.iloc[3] for _, r in cat_rows]
+        cat_all_pre    = [r.iloc[1] for _, r in cat_rows]
+        cat_all_post   = [r.iloc[2] for _, r in cat_rows]
+        cat_avg_shift  = float(np.nanmean(cat_all_shifts)) if cat_all_shifts else 0
+        cat_avg_pre    = float(np.nanmean(cat_all_pre))    if cat_all_pre    else 0
+        cat_avg_post   = float(np.nanmean(cat_all_post))   if cat_all_post   else 0
+        cat_sum_fmt = workbook.add_format({
+            "bold": True, "bg_color": cat_colour, "font_color": "#FFFFFF",
+            "font_name": "Arial", "font_size": 10,
+            "num_format": "0.0", "align": "center", "italic": True,
+        })
+        cat_sum_lbl = workbook.add_format({
+            "bold": True, "bg_color": cat_colour, "font_color": "#FFFFFF",
+            "font_name": "Arial", "font_size": 10, "italic": True,
+        })
+        cat_sum_shift = workbook.add_format({
+            "bold": True, "bg_color": cat_colour, "font_color": "#FFFFFF",
+            "font_name": "Arial", "font_size": 10,
+            "num_format": "+0.0;-0.0;0.0", "align": "center", "italic": True,
+        })
+        ws.set_row(ga_r, 16)
+        ws.write(ga_r, 0, f"  ↳ {cat} Average", cat_sum_lbl)
+        ws.write_number(ga_r, 1, cat_avg_pre,   cat_sum_fmt)
+        ws.write_number(ga_r, 2, cat_avg_post,  cat_sum_fmt)
+        ws.write_number(ga_r, 3, cat_avg_shift, cat_sum_shift)
+        for cc in range(4, len(avg_df.columns)):
+            ws.write(ga_r, cc, "", cat_sum_fmt)
+        ga_r += 2  # spacer row after each category
+
+    ws.conditional_format(f"B2:C{ga_r}",
                           {"type": "data_bar", "bar_color": "#70AD47", "bar_only": False})
 
     # ────────────────────────────────────────────────────────────────
@@ -1767,6 +2036,22 @@ def write_html_report(html_path, tab1_df, avg_df, dist_df, breakdown_df,
                 growth_pct = round(len(v[v.isin(["Yes","Partial"])]) / len(v) * 100)
                 break
 
+    # ── Category summary for overview cards
+    cat_summary_cards = []
+    for cat in CATEGORY_ORDER:
+        cat_rows = avg_df[avg_df["Metric"].isin(METRIC_CATEGORIES.get(cat, []))] if not avg_df.empty else pd.DataFrame()
+        if cat_rows.empty:
+            continue
+        cat_avg_shift = float(cat_rows["Avg Shift"].mean())
+        cat_pct_imp   = float(cat_rows["% Improvers"].mean()) if "% Improvers" in cat_rows.columns else 0
+        cat_colour_cls = {"Activity Skills": "teal", "Camping Skills": "green",
+                          "Attitudes": "amber", "Knowledge": "purple"}.get(cat, "")
+        cat_summary_cards.append({
+            "cat": cat, "icon": CATEGORY_ICONS.get(cat, ""),
+            "avg_shift": cat_avg_shift, "pct_imp": cat_pct_imp,
+            "colour_cls": cat_colour_cls,
+        })
+
     # ── Metric chart data
     metric_labels, pre_vals, post_vals, shift_vals, median_shift_vals, pct_improvers_vals = [], [], [], [], [], []
     if not avg_df.empty and "Metric" in avg_df.columns:
@@ -2073,31 +2358,60 @@ def write_html_report(html_path, tab1_df, avg_df, dist_df, breakdown_df,
                 f'<div class="na-count-grid">{field_summaries}</div>'
             )
 
-    # ── Metric table rows
-    metric_rows_html = ""
-    for i, m in enumerate(metric_labels):
-        pre  = pre_vals[i]
-        post = post_vals[i]
-        sh   = shift_vals[i]
-        med  = median_shift_vals[i] if i < len(median_shift_vals) else 0
-        pct  = pct_improvers_vals[i] if i < len(pct_improvers_vals) else 0
+    # ── Category summary section HTML (4 stat cards + per-category table)
+    cat_cards_html = ""
+    for cs in cat_summary_cards:
+        sh = cs["avg_shift"]
         arrow = "▲" if sh > 0.05 else ("▼" if sh < -0.05 else "—")
-        cls   = "pos" if sh > 0.05 else ("neg" if sh < -0.05 else "zero")
-        med_arrow = "▲" if med > 0.05 else ("▼" if med < -0.05 else "—")
-        med_cls   = "pos" if med > 0.05 else ("neg" if med < -0.05 else "zero")
-        pct_cls   = "pos" if pct >= 55 else ("neg" if pct < 35 else "amber")
-        bar_w = min(abs(sh) / 3.0 * 100, 100)
+        sign_cls = "pos" if sh > 0.05 else ("neg" if sh < -0.05 else "zero")
+        cat_cards_html += (
+            f'<div class="card {cs["colour_cls"]}">'
+            f'<div class="card-val"><span class="{sign_cls}">{arrow} {sh:+.2f}</span></div>'
+            f'<div class="card-lbl">{cs["icon"]} {cs["cat"]} &mdash; avg shift</div>'
+            f'<div class="card-sub">{cs["pct_imp"]:.0f}% of students improved</div>'
+            f'</div>'
+        )
+
+    # ── Grouped metric table: one section per category
+    metric_rows_html = ""
+    for cat in CATEGORY_ORDER:
+        cat_metrics_in_avg = [(i, row) for i, row in enumerate(metric_labels)
+                              if row in METRIC_CATEGORIES.get(cat, [])]
+        if not cat_metrics_in_avg:
+            continue
+        cat_colour_hex  = CATEGORY_COLOURS.get(cat, "#2E8B88")
+        cat_light_hex   = CATEGORY_LIGHT_COLOURS.get(cat, "#D4F0EF")
+        cat_icon        = CATEGORY_ICONS.get(cat, "")
+        # Category section header row
         metric_rows_html += (
-            f"<tr>"
-            f"<td class='metric-name'>{m}</td>"
-            f"<td class='num-cell'>{pre:.1f}</td>"
-            f"<td class='num-cell'>{post:.1f}</td>"
-            f"<td class='shift-cell {cls}'>{arrow} {sh:+.2f}</td>"
-            f"<td class='shift-cell {med_cls}'>{med_arrow} {med:+.2f}</td>"
-            f"<td class='shift-cell {pct_cls}'>{pct:.1f}%</td>"
-            f"<td class='bar-cell'><div class='shift-bar {cls}' style='width:{bar_w:.0f}%;min-width:2px'></div></td>"
-            f"</tr>"
-        ).replace("'", '"')
+            f'<tr class="cat-header-row" style="background:{cat_colour_hex}">'
+            f'<td colspan="7" style="color:#fff;font-weight:700;font-size:13px;'
+            f'padding:10px 16px;letter-spacing:.04em">'
+            f'{cat_icon}&nbsp;&nbsp;{cat}</td></tr>'
+        )
+        for i, m in cat_metrics_in_avg:
+            pre  = pre_vals[i]
+            post = post_vals[i]
+            sh   = shift_vals[i]
+            med  = median_shift_vals[i] if i < len(median_shift_vals) else 0
+            pct  = pct_improvers_vals[i] if i < len(pct_improvers_vals) else 0
+            arrow = "▲" if sh > 0.05 else ("▼" if sh < -0.05 else "—")
+            cls   = "pos" if sh > 0.05 else ("neg" if sh < -0.05 else "zero")
+            med_arrow = "▲" if med > 0.05 else ("▼" if med < -0.05 else "—")
+            med_cls   = "pos" if med > 0.05 else ("neg" if med < -0.05 else "zero")
+            pct_cls   = "pos" if pct >= 55 else ("neg" if pct < 35 else "amber")
+            bar_w = min(abs(sh) / 3.0 * 100, 100)
+            metric_rows_html += (
+                f'<tr style="background:{cat_light_hex}">'
+                f'<td class="metric-name" style="padding-left:28px">{m}</td>'
+                f'<td class="num-cell">{pre:.1f}</td>'
+                f'<td class="num-cell">{post:.1f}</td>'
+                f'<td class="shift-cell {cls}">{arrow} {sh:+.2f}</td>'
+                f'<td class="shift-cell {med_cls}">{med_arrow} {med:+.2f}</td>'
+                f'<td class="shift-cell {pct_cls}">{pct:.1f}%</td>'
+                f'<td class="bar-cell"><div class="shift-bar {cls}" style="width:{bar_w:.0f}%;min-width:2px"></div></td>'
+                f'</tr>'
+            ).replace("'", '"')
 
     # ── Class breakdown rows
     class_rows_html = ""
@@ -2249,6 +2563,8 @@ blockquote.na-quote{background:#F5F3FF;border-left-color:#7C3AED}
 .na-count-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:16px;margin-bottom:24px}
 .na-count-block{background:white;border-radius:10px;padding:16px;box-shadow:0 1px 4px rgba(0,0,0,.08);border-top:3px solid #7C3AED}
 .na-count-title{font-size:11px;font-weight:700;color:#7C3AED;text-transform:uppercase;letter-spacing:.05em;margin-bottom:8px}
+.cat-header-row td{font-size:13px!important;letter-spacing:.04em}
+.card-sub{font-size:11px;color:#9CA3AF;margin-top:2px}
 .footer{text-align:center;color:#9CA3AF;font-size:12px;margin-top:48px;padding:24px}
 @media(max-width:768px){
   .hero{flex-direction:column;padding:28px 24px;gap:24px}
@@ -2305,7 +2621,10 @@ blockquote.na-quote{background:#F5F3FF;border-left-color:#7C3AED}
   """ + po_card_html + """
   </div>
 
-  <h2 class="section-title" id="skills">&#128208; Skill &amp; Attitude Shifts</h2>
+  <h2 class="section-title">&#128202; Results by Category</h2>
+  <div class="cards">""" + cat_cards_html + """</div>
+
+  <h2 class="section-title" id="skills">&#128208; Skill &amp; Attitude Shifts by Category</h2>
   <table class="metric-table">
     <thead><tr>
       <th>Skill / Area</th>
