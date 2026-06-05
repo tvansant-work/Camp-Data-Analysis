@@ -22,7 +22,7 @@ Features:
   • Coding cache: identical data = instant re-run, no re-coding needed
 """
 
-import gc, hashlib, json, os, pickle, re, traceback
+import gc, hashlib, json, math, os, pickle, re, traceback
 from datetime import datetime
 
 import numpy as np
@@ -68,13 +68,41 @@ def safe_json(text):
     return None
 
 
+_GARBAGE_SET = frozenset({
+    "yes", "no", "nope", "yep", "yup", "yeah", "na", "n/a", "none",
+    "nothing", "idk", "not sure", "don't know", "dont know", "good",
+    "fine", "ok", "okay", "not applicable", "nil", "null", "-", ".",
+    "no response", "no comment", "unsure", "maybe", "dunno", "cool",
+    "fun", "great", "nice", "good thanks", "not really", "no idea",
+})
+
+def is_valid_response(text):
+    """Return True if the response is a genuine, substantive answer worth analysing."""
+    text = str(text).strip()
+    # Minimum length
+    if len(text) < 10:
+        return False
+    # Must have at least 3 words containing letters
+    words = [w for w in text.split() if re.search(r'[a-zA-Z]', w)]
+    if len(words) < 3:
+        return False
+    # Blocklist of non-answers
+    if text.lower() in _GARBAGE_SET:
+        return False
+    # Reject if fewer than 40% alphabetic characters (random chars, numbers-only, etc.)
+    alpha = sum(1 for c in text if c.isalpha())
+    if alpha / len(text) < 0.4:
+        return False
+    return True
+
+
 # ═══════════════════════════════════════════════════════════════════
 #  CACHE
 # ═══════════════════════════════════════════════════════════════════
 
 CACHE_DIR     = os.path.expanduser("~/Library/Application Support/Camp_Analysis")
 CACHE_FILE    = os.path.join(CACHE_DIR, "coding_cache.pkl")
-CACHE_VERSION = "v7-html-upgrade"
+CACHE_VERSION = "v8-map-reduce"
 
 def load_coding_cache():
     try:
@@ -336,30 +364,106 @@ def code_question(coding_model, coding_tokenizer, qc, post_df, email_list,
 
 SYSTEM_NARRATOR = (
     "You are an educational analyst writing a concise summary for a school camp report. "
-    "Write in clear paragraphs. Be specific and evidence-based."
+    "Write in clear paragraphs using Australian English spelling and vocabulary. "
+    "Be specific and evidence-based."
 )
 
 def generate_narrative(narrative_model, narrative_tokenizer, qc, responses, status_label, root):
+    """Summarise all responses using a map-reduce approach.
+
+    Responses are first filtered for quality, then split into 3 equal chunks.
+    Each chunk is summarised independently (map), and the chunk summaries are
+    synthesised into a final narrative + best quotes (reduce).
+    For small cohorts (<=50 valid responses) a single pass is used instead.
+    """
+    # ── Filter garbage / non-answers
+    valid_responses = [r for r in responses if is_valid_response(r)]
+    total_n         = len(valid_responses)
+    raw_n           = sum(1 for r in responses if len(str(r).strip()) > 3)
+    filtered_out    = raw_n - total_n
+
+    if not valid_responses:
+        return "Insufficient responses to generate a summary."
+
+    filtered_note = (
+        f" ({filtered_out} low-quality responses filtered before analysis)"
+        if filtered_out > 0 else ""
+    )
+
+    # ── Single pass for small cohorts
+    if total_n <= 50:
+        status_label.config(
+            text=f"Status: Writing Q{qc['num']} narrative ({total_n} responses)...",
+            fg="#D97706")
+        root.update()
+        resp_text = "\n".join(f"- {r}" for r in valid_responses)
+        prompt = (
+            f'Summarise these student responses about: "{qc['label']}"\n\n'
+            f'Write exactly 2 short paragraphs:\n'
+            f'  1. The most common themes and overall student sentiment.\n'
+            f'  2. What these responses reveal about student development or growth.\n\n'
+            f'Then include exactly 3 to 5 highly valuable, verbatim quotes that best '
+            f'capture the essence of the responses. Choose the most insightful quotes '
+            f'regardless of where they appear in the list — do not feel obligated to '
+            f'spread selection evenly. For each quote, add a brief contextual note in '
+            f'square brackets before it only if it genuinely aids understanding '
+            f'(e.g. [on coasteering]). Format with bullet points and quotation marks.\n\n'
+            f'Student responses (n={total_n}){filtered_note}:\n{resp_text}'
+        )
+        return call_mlx(narrative_model, narrative_tokenizer, SYSTEM_NARRATOR,
+                        prompt, max_tokens=600, thinking=False).strip()
+
+    # ── Map-reduce for larger cohorts: divide into 3 equal chunks
+    chunk_size = math.ceil(total_n / 3)
+    chunks     = [valid_responses[i:i + chunk_size]
+                  for i in range(0, total_n, chunk_size)]
+    n_chunks   = len(chunks)
+
+    chunk_summaries = []
+    for i, chunk in enumerate(chunks, 1):
+        status_label.config(
+            text=f"Status: Q{qc['num']} — summarising batch {i}/{n_chunks} ({len(chunk)} responses)...",
+            fg="#D97706")
+        root.update()
+        resp_text = "\n".join(f"- {r}" for r in chunk)
+        map_prompt = (
+            f'You are reading a batch of student responses about: "{qc['label']}".\n'
+            f'This is batch {i} of {n_chunks} (responses {(i-1)*chunk_size+1}–'
+            f'{min(i*chunk_size, total_n)} of {total_n} total).\n\n'
+            f'Identify the key themes in this batch and copy out 3–5 of the most '
+            f'insightful verbatim quotes from these responses. Be concise.\n\n'
+            f'Student responses:\n{resp_text}'
+        )
+        summary = call_mlx(narrative_model, narrative_tokenizer, SYSTEM_NARRATOR,
+                           map_prompt, max_tokens=450, thinking=False).strip()
+        chunk_summaries.append(summary)
+
+    # ── Reduce: synthesise all chunk summaries into the final narrative
     status_label.config(
-        text=f"Status: Writing Q{qc['num']} narrative & extracting quotes...",
+        text=f"Status: Q{qc['num']} — synthesising across {n_chunks} batches...",
         fg="#D97706")
     root.update()
-    sample = [r for r in responses if len(r.strip()) > 3][:50]
-    if not sample:
-        return "Insufficient responses to generate a summary."
-    resp_text = "\n".join(f"- {r}" for r in sample)
-    prompt = f"""Summarise these student responses about: "{qc['label']}"
 
-Write exactly 2 short paragraphs:
-  1. The most common themes and overall student sentiment.
-  2. What these responses reveal about student development or growth.
+    combined = "\n\n---\n\n".join(
+        f"BATCH {i} ({len(chunks[i-1])} responses):\n{s}"
+        for i, s in enumerate(chunk_summaries, 1)
+    )
 
-Then, below your summary, include exactly 3 to 5 highly valuable, reflective, verbatim quotes from the students that capture the essence of their experience. Format the quotes cleanly with bullet points and quotation marks.
-
-Student responses (n={len(sample)}):
-{resp_text}"""
+    reduce_prompt = (
+        f'Below are summaries of all {n_chunks} batches covering {total_n} student '
+        f'responses about: "{qc['label']}"{filtered_note}.\n\n'
+        f'Write the final report section:\n'
+        f'  1. Two short paragraphs: (a) the most common themes and overall sentiment '
+        f'across ALL responses, (b) what these responses reveal about student development.\n'
+        f'  2. Exactly 3 to 5 of the very best verbatim student quotes drawn from any '
+        f'batch — choose purely on quality and insight, not to represent each batch '
+        f'equally. For each quote, add a brief contextual note in square brackets '
+        f'only if it genuinely aids understanding. Format with bullet points and '
+        f'quotation marks.\n\n'
+        f'BATCH SUMMARIES:\n{combined}'
+    )
     return call_mlx(narrative_model, narrative_tokenizer, SYSTEM_NARRATOR,
-                    prompt, max_tokens=500, thinking=False).strip()
+                    reduce_prompt, max_tokens=650, thinking=False).strip()
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -407,7 +511,7 @@ def build_coded_df(post_df, email_list, names, surnames, classes, locations,
             continue
         narrative_text = generate_narrative(narrative_model, narrative_tokenizer,
                                             qc, raw_vals, status_label, root)
-        valid_n = sum(1 for r in raw_vals if len(r) > 3)
+        valid_n = sum(1 for r in raw_vals if is_valid_response(r))
         narratives.append({"Question": f"Q{qnum}: {qc['label']}", "n": valid_n, "Summary": narrative_text})
     return coded_df, narratives
 
@@ -631,23 +735,25 @@ def build_non_attend_analysis(non_attend_df, model, tokenizer, status_label, roo
         status_label.config(
             text=f"Status: Writing non-attender narrative ({qc['label']})…", fg="#D97706")
         root.update()
-        sample = [t for t in combined_texts if len(t) > 3][:50]
+        sample = [t for t in combined_texts if is_valid_response(t)]
         if sample:
             resp_text = "\n".join(f"- {r}" for r in sample)
+            valid_n   = sum(1 for t in combined_texts if is_valid_response(t))
             prompt = (
-                f'Summarise these responses from students who did NOT attend camp, '
-                f'specifically about: "{qc["label"]}"\n\n'
-                f'Write exactly 2 short paragraphs:\n'
-                f'  1. The most common themes and patterns across these responses.\n'
-                f'  2. What these responses reveal about barriers to attendance and '
-                f'opportunities for the school to improve future participation.\n\n'
-                f'Then list 3 to 5 verbatim student quotes that best capture the key themes. '
-                f'Format with bullet points and quotation marks.\n\n'
-                f'Student responses (n={len(sample)}):\n{resp_text}'
+                f'Using Australian English, write a brief, concise summary of these '
+                f'responses from students who did NOT attend camp, specifically about: '
+                f'"{qc["label"]}"\n\n'
+                f'This is a small group (n={valid_n}), so keep it tight: write ONE short '
+                f'paragraph covering the key themes and any patterns. '
+                f'Then list 2 to 3 verbatim student quotes that best capture the themes. '
+                f'For each quote, add a brief contextual note in square brackets before it '
+                f'if it helps the reader understand the context (e.g. [on equipment concerns]). '
+                f'Only add context where it genuinely aids understanding. '
+                f'Format quotes with bullet points and quotation marks.\n\n'
+                f'Student responses (n={valid_n}):\n{resp_text}'
             )
             narr_text = call_mlx(model, tokenizer, SYSTEM_NARRATOR,
-                                 prompt, max_tokens=500, thinking=False).strip()
-            valid_n   = sum(1 for t in combined_texts if len(t) > 3)
+                                 prompt, max_tokens=400, thinking=False).strip()
         else:
             narr_text = "No usable responses found for this question."
             valid_n   = 0
@@ -1746,16 +1852,93 @@ def write_html_report(html_path, tab1_df, avg_df, dist_df, breakdown_df,
 
     # ── Parse narrative: split on *** to separate analysis from quotes
     def parse_narrative(text):
+        """Split AI narrative into (analysis_text, [quotes]).
+
+        Detects quotes by looking for lines that start with a bullet character
+        followed by a quotation mark, or a contextual bracket tag then a quote.
+        Falls back to the legacy *** separator if present.
+        Quote lines are stripped from the analysis block so they don't appear twice.
+        """
         if not text or str(text).strip() in ("","nan"):
             return "", []
-        parts = str(text).split("***")
-        analysis = parts[0].replace("\\n","\n").strip()
+
+        text = str(text).replace("\\n", "\n").strip()
+
+        # ── Legacy separator support
+        if "***" in text:
+            parts = text.split("***", 1)
+            analysis_raw = parts[0].strip()
+            quote_block  = parts[1]
+        else:
+            analysis_raw = text
+            quote_block  = None
+
+        # ── Detect quote lines anywhere in the text
+        # A quote line is one whose meaningful content (after stripping bullets/spaces)
+        # starts with a quotation mark or an optional [context tag] then a quotation mark.
+        QUOTE_OPENERS = ('"', '\u201c', '\u2018', "'")
+        BULLET_CHARS  = ("*", "•", "-", "·", "–")
+
+        def looks_like_quote(line):
+            s = line.strip()
+            # Strip leading bullet + space
+            for b in BULLET_CHARS:
+                if s.startswith(b):
+                    s = s[len(b):].strip()
+                    break
+            # Allow optional [context tag]
+            if s.startswith("["):
+                end = s.find("]")
+                if end != -1:
+                    s = s[end + 1:].strip()
+            return s.startswith(QUOTE_OPENERS) and len(s) > 12
+
+        lines          = text.split("\n")
+        analysis_lines = []
+        raw_quote_lines = []
+
+        if quote_block is not None:
+            # Use the explicit separator split
+            analysis_lines = analysis_raw.split("\n")
+            raw_quote_lines = quote_block.split("\n")
+        else:
+            # Auto-detect: once we see the first quote line, everything after is quotes
+            in_quotes = False
+            for line in lines:
+                if not in_quotes and looks_like_quote(line):
+                    in_quotes = True
+                if in_quotes:
+                    raw_quote_lines.append(line)
+                else:
+                    analysis_lines.append(line)
+
+        # Clean the analysis block
+        analysis = "\n".join(analysis_lines).strip()
+
+        # Extract clean quote strings
         quotes = []
-        if len(parts) > 1:
-            for line in parts[1].replace("\\n","\n").split("\n"):
-                line = line.strip().lstrip("*•-· ").strip().strip('"').strip("'").strip()
-                if len(line) > 8:
-                    quotes.append(line)
+        for line in raw_quote_lines:
+            s = line.strip()
+            if not s:
+                continue
+            # Strip leading bullet
+            for b in BULLET_CHARS:
+                if s.startswith(b):
+                    s = s[len(b):].strip()
+                    break
+            # Preserve [context tag] if present
+            context_tag = ""
+            if s.startswith("["):
+                end = s.find("]")
+                if end != -1:
+                    context_tag = s[:end + 1] + " "
+                    s = s[end + 1:].strip()
+            # Strip outer quote marks
+            for q in ('\u201c', '\u201d', '"'): s = s.replace(q, '"')
+            s = s.strip('"').strip("'").strip()
+            if len(s) > 8:
+                quotes.append(context_tag + s)
+
         return analysis, quotes
 
     # ── Build qual sections HTML
@@ -1781,7 +1964,7 @@ def write_html_report(html_path, tab1_df, avg_df, dist_df, breakdown_df,
                 field_charts += (
                     "<div class=\'field-chart-wrap\'>"
                     "<h5 class=\"field-chart-title\">" + field.replace("_"," ") + "</h5>"
-                    f"<canvas id=\'{cid}\' height=\'120\'></canvas>"
+                    f"<canvas id=\'{cid}\' height=\'130\'></canvas>"
                     "</div>"
                 )
         field_charts = field_charts.replace("\'", '"')
@@ -2044,7 +2227,7 @@ body{font-family:'Segoe UI',Arial,sans-serif;background:#F0F4F8;color:#1a2332;fo
 .q-num{background:#2E8B88;color:white;border-radius:6px;padding:4px 12px;font-weight:800;font-size:15px;flex-shrink:0}
 .q-label{font-size:17px;font-weight:700;flex:1}
 .q-n{opacity:.75;font-size:13px;flex-shrink:0}
-.qual-body{padding:24px;display:grid;grid-template-columns:1fr 280px;gap:32px}
+.qual-body{padding:24px;display:grid;grid-template-columns:1fr 380px;gap:32px}
 .qual-analysis p{color:#374151;line-height:1.75;font-size:14px;margin-bottom:12px}
 .quotes-block{margin-top:16px;border-top:2px solid #E5E7EB;padding-top:16px}
 blockquote.quote-item{background:#F0F9FF;border-left:4px solid #2E8B88;padding:10px 14px;margin-bottom:10px;border-radius:0 8px 8px 0;font-style:italic;color:#1B3A5C;font-size:13.5px;line-height:1.6}
@@ -2263,8 +2446,7 @@ Object.entries(qualData).forEach(([field,d])=>{
     options:{
       indexAxis:'y',responsive:true,
       plugins:{legend:{display:false},tooltip:{callbacks:{label:c=>` ${c.parsed.x} students`}}},
-      scales:{x:{grid:{color:'#F0F0F0'},ticks:{font:{size:10}}},y:{grid:{display:false},ticks:{font:{size:10}}}}
-    }
+      scales:{x:{grid:{color:\'#F0F0F0\'},ticks:{font:{size:9}}},y:{grid:{display:false},ticks:{font:{size:9},callback:function(value){const lbl=this.getLabelForValue(value);return lbl.length>20?lbl.substring(0,18)+'…':lbl;}}}} }
   });
 });
 </script>
