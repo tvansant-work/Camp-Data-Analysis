@@ -28,7 +28,7 @@ from datetime import datetime
 import numpy as np
 import pandas as pd
 import tkinter as tk
-from tkinter import messagebox, filedialog
+from tkinter import messagebox, filedialog, ttk
 from xlsxwriter.utility import xl_col_to_name
 
 
@@ -2740,7 +2740,7 @@ def write_html_report(html_path, tab1_df, avg_df, dist_df, breakdown_df,
                 field_charts += (
                     "<div class=\'field-chart-wrap\'>"
                     "<h5 class=\"field-chart-title\">" + field.replace("_"," ") + "</h5>"
-                    f"<canvas id=\'{cid}\' height=\'130\'></canvas>"
+                    f"<canvas id=\'{cid}\' style=\'height:130px;width:100%;display:block\'></canvas>"
                     "</div>"
                 )
         field_charts = field_charts.replace("\'", '"')
@@ -3075,7 +3075,7 @@ body{font-family:'Segoe UI',Arial,sans-serif;background:#F0F4F8;color:#1a2332;fo
 .quotes-block{margin-top:16px;border-top:2px solid #E5E7EB;padding-top:16px}
 blockquote.quote-item{background:#F0F9FF;border-left:4px solid #2E8B88;padding:10px 14px;margin-bottom:10px;border-radius:0 8px 8px 0;font-style:italic;color:#1B3A5C;font-size:13.5px;line-height:1.6}
 .qual-charts{display:flex;flex-direction:column;gap:14px;border-left:1px solid #F0F0F0;padding-left:20px;min-width:0}
-.field-chart-wrap{background:#F9FAFB;border-radius:8px;padding:12px}
+.field-chart-wrap{background:#F9FAFB;border-radius:8px;padding:12px;position:relative}
 .field-chart-title{font-size:10px;font-weight:700;color:#6B7280;text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px}
 .no-chart{color:#9CA3AF;font-size:12px;font-style:italic;padding:12px}
 .mm-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(340px,1fr));gap:20px}
@@ -3482,6 +3482,19 @@ def setup_gui():
     root.resizable(False, False)
     root.configure(bg="#F8FAFC")
 
+    # 'clam' is a cross-platform ttk theme that actually honours custom
+    # colours (unlike the default macOS 'aqua' theme, which ignores
+    # bg/fg on plain tk.Button widgets and made GENERATE REPORTS hard to see)
+    style = ttk.Style()
+    style.theme_use("clam")
+    style.configure("Generate.TButton",
+                     background="#1B3A5C", foreground="white",
+                     font=("Arial", 13, "bold"), padding=10,
+                     borderwidth=0, relief="flat")
+    style.map("Generate.TButton",
+              background=[("active", "#2E8B88"), ("pressed", "#2E8B88")],
+              foreground=[("active", "white"), ("pressed", "white")])
+
     files = {"student": "", "pre": "", "post": "", "ruby": ""}
 
     def pick(key, entry):
@@ -3527,15 +3540,12 @@ def setup_gui():
                       font=("Arial", 10, "italic"), fg="#9CA3AF", bg="#F8FAFC")
     status.pack(pady=(0, 8))
 
-    tk.Button(root, text="▶  GENERATE REPORTS",
-              bg="#1B3A5C", fg="white",
-              font=("Arial", 13, "bold"),
-              activebackground="#2E8B88", activeforeground="white",
-              relief="flat", pady=10,
-              command=lambda: generate_report(
-                  files["student"], files["pre"], files["post"], status, root,
-                  ruby_path=files["ruby"] or None)
-              ).pack(pady=4, fill="x", padx=30)
+    ttk.Button(root, text="▶  GENERATE REPORTS",
+               style="Generate.TButton",
+               command=lambda: generate_report(
+                   files["student"], files["pre"], files["post"], status, root,
+                   ruby_path=files["ruby"] or None)
+               ).pack(pady=4, fill="x", padx=30)
 
     tk.Label(root, text="Generates: ~/Documents/Camp_Analysis_Report.xlsx  +  Camp_Report_Presentation.html",
              font=("Arial", 8), fg="#9CA3AF", bg="#F8FAFC").pack(pady=(4,0))
