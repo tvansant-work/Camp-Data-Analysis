@@ -2466,13 +2466,10 @@ def write_html_report(html_path, tab1_df, avg_df, dist_df, breakdown_df,
             else:
                 g_str, g_class = "\u2014", "zero"
             conf_class = ag_conf_cls.get(conf26, "zero")
-            reliability = str(rrow.get("Comparison Reliability", ""))
             ag_table_rows_html += (
                 f"<tr><td>{name}</td><td style='text-align:center'>{lvl26}</td>"
-                f"<td style='text-align:center' class='{conf_class}'>{conf26}</td>"
                 f"<td style='text-align:center'>{lvl25}</td>"
-                f"<td style='text-align:center' class='{g_class}'>{g_str}</td>"
-                f"<td style='font-size:11px;color:#6B7280'>{reliability}</td></tr>"
+                f"<td style='text-align:center' class='{g_class}'>{g_str}</td></tr>"
             ).replace("'", '"')
 
     ag_level_desc_html = "".join(
@@ -2503,8 +2500,7 @@ def write_html_report(html_path, tab1_df, avg_df, dist_df, breakdown_df,
             "<div class='ag-warning'>&#9888;&#65039; <strong>Reading this data:</strong> "
             "2026 = this Y8 camp cohort. 2025 = the same students&rsquo; Y7 Maria Camp baseline &mdash; "
             "a different camp, different rater, and roughly a year apart. Year-on-year comparisons are "
-            "shown for interest but should be treated as indicative, not definitive. Students are matched "
-            "by email; the source data&rsquo;s &ldquo;Class&rdquo; field is not used because it is unreliable.</div>"
+            "shown for interest but should be treated as indicative, not definitive.</div>"
             "<div class='ag-grid'>"
             "<div class='ag-levels-card'><h4>The Five Levels</h4>" + ag_level_desc_html + "</div>"
             "<div class='ag-stats-col'>"
@@ -2520,17 +2516,16 @@ def write_html_report(html_path, tab1_df, avg_df, dist_df, breakdown_df,
             "<div class='chart-box' style='height:260px'><h3>2026 Level Distribution</h3>"
             "<canvas id='agency-level-chart' style='height:200px;width:100%;display:block'></canvas></div>"
             "</div></div>"
-            + (f"<div class='chart-box' style='height:{min(460, max(280, len(ag_growth_vals)*24+60))}px;margin-top:16px'>"
+            + (f"<div class='chart-box' style='height:{max(220, len(ag_growth_vals)*22)+64}px;margin-top:16px'>"
                "<h3>Growth, Y7 Maria Camp &rarr; Y8 Camp (students with both data points)</h3>"
-               f"<div style='overflow-y:auto;height:{min(400, max(220, len(ag_growth_vals)*24))}px'>"
-               f"<canvas id='agency-growth-chart' style='height:{max(220, len(ag_growth_vals)*24)}px;width:100%;display:block'></canvas></div></div>"
+               f"<canvas id='agency-growth-chart' style='height:{max(220, len(ag_growth_vals)*22)}px;width:100%;display:block'></canvas></div>"
                if ag_growth_vals else
                "<p style='color:#9CA3AF;font-size:12px;margin-top:8px'>No students currently have both a 2025 and 2026 score to compare.</p>")
 
             + "<h3 style='margin-top:20px;font-size:15px;color:#1B3A5C'>Student-Level Detail</h3>"
             "<div class='breakdown-wrap'><table class='breakdown-table' style='white-space:normal'>"
-            "<thead><tr><th>Name</th><th>2026 Level</th><th>2026 Match</th>"
-            "<th>2025 Level (Y7)</th><th>Growth</th><th>Comparison Reliability</th></tr></thead>"
+            "<thead><tr><th>Name</th><th>2026 Level</th>"
+            "<th>2025 Level (Y7)</th><th>Growth</th></tr></thead>"
             f"<tbody>{ag_table_rows_html}</tbody></table></div>"
         )
 
@@ -2674,6 +2669,15 @@ def write_html_report(html_path, tab1_df, avg_df, dist_df, breakdown_df,
             # Strip outer quote marks
             for q in ('\u201c', '\u201d', '"'): s = s.replace(q, '"')
             s = s.strip('"').strip("'").strip()
+            # Strip stray markdown emphasis characters left over from labels
+            # like "**Selected Verbatim Insights:**" that slipped into the
+            # quote block instead of being real student quotes.
+            s = re.sub(r"^\*+|\*+$", "", s).strip()
+            s_check = s.rstrip(":").strip().lower()
+            if re.match(r"^(selected verbatim insights|key student insights|"
+                        r"key insights|verbatim insights|student quotes|"
+                        r"selected quotes|verbatim quotes)$", s_check):
+                continue  # it's a section label, not a real quote
             if len(s) > 8:
                 quotes.append(context_tag + s)
 
@@ -2740,16 +2744,28 @@ def write_html_report(html_path, tab1_df, avg_df, dist_df, breakdown_df,
                 field_charts += (
                     "<div class=\'field-chart-wrap\'>"
                     "<h5 class=\"field-chart-title\">" + field.replace("_"," ") + "</h5>"
-                    f"<canvas id=\'{cid}\' style=\'height:130px;width:100%;display:block\'></canvas>"
-                    "</div>"
+                    "<div class=\'field-chart-canvas-box\'>"
+                    f"<canvas id=\'{cid}\'></canvas>"
+                    "</div></div>"
                 )
         field_charts = field_charts.replace("\'", '"')
 
-        # Analysis paragraphs
-        analysis_html = "".join(
-            f"<p>{para.strip()}</p>"
-            for para in analysis.split("\n\n") if para.strip()
-        )
+        # Analysis paragraphs — render markdown headings (##) and bold (**) as
+        # real HTML instead of leaving literal markdown characters on screen
+        def _md_inline(txt):
+            return re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", txt)
+
+        analysis_html = ""
+        for para in analysis.split("\n\n"):
+            para = para.strip()
+            if not para:
+                continue
+            heading_match = re.match(r"^#{1,6}\s*(.+)$", para)
+            if heading_match:
+                analysis_html += f"<h4 class='qual-heading'>{_md_inline(heading_match.group(1).strip())}</h4>"
+            else:
+                analysis_html += f"<p>{_md_inline(para)}</p>"
+        analysis_html = analysis_html.replace("\'", '"')
 
         # Student quotes
         quotes_html = ""
@@ -2758,7 +2774,11 @@ def write_html_report(html_path, tab1_df, avg_df, dist_df, breakdown_df,
                 f"<blockquote class=\'quote-item\'>&ldquo;{q}&rdquo;</blockquote>"
                 for q in quotes[:5]
             ).replace("\'",'"')
-            quotes_html = f"<div class=\'quotes-block\'>{items}</div>".replace("\'",'"')
+            quotes_html = (
+                "<div class=\'quotes-block\'>"
+                "<div class=\'quotes-caption\'>&#128172; Selected Verbatim Insights</div>"
+                f"{items}</div>"
+            ).replace("\'",'"')
 
         no_chart = "" if field_charts else "<p class=\'no-chart\'>Chart data populates after AI coding run.</p>".replace("\'",'"')
 
@@ -2977,6 +2997,10 @@ def write_html_report(html_path, tab1_df, avg_df, dist_df, breakdown_df,
                 f'<div class="card-lbl">{po_name} &mdash; post-camp (n={po_n})</div>'
                 f'</div>'
             )
+            if po_name.startswith("Agency in Learning"):
+                # Already has its own dedicated section with a year-on-year
+                # comparison chart, so skip the redundant Skills table row.
+                continue
             bar_w = min(po_avg / 10.0 * 100, 100)
             po_metric_row_html += (
                 f'<tr class="po-row">'
@@ -3072,11 +3096,15 @@ body{font-family:'Segoe UI',Arial,sans-serif;background:#F0F4F8;color:#1a2332;fo
 .q-n{opacity:.75;font-size:13px;flex-shrink:0}
 .qual-body{padding:24px;display:grid;grid-template-columns:1fr 380px;gap:32px}
 .qual-analysis p{color:#374151;line-height:1.75;font-size:14px;margin-bottom:12px}
+.qual-analysis h4.qual-heading{color:#1B3A5C;font-size:15.5px;font-weight:700;margin:0 0 10px;padding-bottom:6px;border-bottom:2px solid #2E8B88}
 .quotes-block{margin-top:16px;border-top:2px solid #E5E7EB;padding-top:16px}
+.quotes-caption{font-size:11px;font-weight:700;color:#2E8B88;text-transform:uppercase;letter-spacing:.05em;margin-bottom:10px}
 blockquote.quote-item{background:#F0F9FF;border-left:4px solid #2E8B88;padding:10px 14px;margin-bottom:10px;border-radius:0 8px 8px 0;font-style:italic;color:#1B3A5C;font-size:13.5px;line-height:1.6}
 .qual-charts{display:flex;flex-direction:column;gap:14px;border-left:1px solid #F0F0F0;padding-left:20px;min-width:0}
-.field-chart-wrap{background:#F9FAFB;border-radius:8px;padding:12px;position:relative;height:190px;overflow:hidden}
+.field-chart-wrap{background:#F9FAFB;border-radius:8px;padding:12px}
 .field-chart-title{font-size:10px;font-weight:700;color:#6B7280;text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px}
+.field-chart-canvas-box{position:relative;height:150px;width:100%}
+.field-chart-canvas-box canvas{width:100%;height:100%;display:block}
 .no-chart{color:#9CA3AF;font-size:12px;font-style:italic;padding:12px}
 .mm-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(340px,1fr));gap:20px}
 .mm-block{background:white;border-radius:10px;padding:20px;box-shadow:0 1px 4px rgba(0,0,0,.08)}
