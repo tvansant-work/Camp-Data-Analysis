@@ -810,26 +810,190 @@ METRIC_CATEGORIES = {
     "Camping Skills":  ["Camping Skills", "Sleeping Outdoors"],
     "Attitudes":       ["Teamwork", "Autonomy", "Drive"],
     "Knowledge":       ["Aboriginal Culture"],
+    "Agency in Learning": ["Agency in Learning (Y7\u2192Y8)"],
 }
-CATEGORY_ORDER = ["Activity Skills", "Camping Skills", "Attitudes", "Knowledge"]
+CATEGORY_ORDER = ["Activity Skills", "Camping Skills", "Attitudes", "Knowledge", "Agency in Learning"]
 CATEGORY_COLOURS = {
     "Activity Skills": "#2E8B88",   # teal
     "Camping Skills":  "#2D7A4F",   # green
     "Attitudes":       "#D97706",   # amber
     "Knowledge":       "#5B21B6",   # purple
+    "Agency in Learning": "#4338CA", # indigo
 }
 CATEGORY_LIGHT_COLOURS = {
     "Activity Skills": "#D4F0EF",
     "Camping Skills":  "#C8EDD9",
     "Attitudes":       "#FEF3C7",
     "Knowledge":       "#EDE9FE",
+    "Agency in Learning": "#E0E7FF",
 }
 CATEGORY_ICONS = {
     "Activity Skills": "🏄",
     "Camping Skills":  "⛺",
     "Attitudes":       "💪",
     "Knowledge":       "📚",
+    "Agency in Learning": "🎯",
 }
+
+
+# ═══════════════════════════════════════════════════════════════════
+#  AGENCY IN LEARNING  (Ruby Data Converter integration)
+#  Blends in the "Agency in Learning" progress data extracted by the
+#  Student Report Extractor (Ruby Data Converter) — a 1-5 progression
+#  scale assessed by teachers. Year 2026 = this Y8 camp cohort.
+#  Year 2025 = the same cohort's Y7 Maria Camp baseline, included only
+#  as a CAUTIOUS comparison (different camp, different rater/timing,
+#  and the "Class" field in that export is not reliable).
+# ═══════════════════════════════════════════════════════════════════
+
+AGENCY_DEFINITION = "The capacity to produce learning of value to self or community."
+
+AGENCY_LEVEL_DESCRIPTIONS = {
+    1: "Learners at this level use guidance from others to support participation in learning.",
+    2: "Learners at this level learn by interpreting and following instructions, looking for "
+       "guidance on what they should learn and how they should learn it.",
+    3: "Learners at this level are skilled achievers who aspire to reach standards, making "
+       "informed and deliberate decisions about their learning.",
+    4: "Learners at this level are motivated to learn independently and from others, engaging "
+       "with ideas and challenges to deepen their own understandings and competence.",
+    5: "Learners at this level apply themselves relentlessly to their learning and are creative "
+       "producers of knowledge, seeking to deepen and expand what they know and can do in "
+       "domains of interest.",
+}
+
+RUBY_CAMP_YEAR        = "2026"   # this Y8 camp cohort
+RUBY_BASELINE_YEAR     = "2025"   # prior-year Y7 Maria Camp baseline (cautious comparison only)
+RUBY_HIGH_CONF_CUTOFF  = 0.95     # match-confidence treated as a reliable, exact-style match
+
+
+def _agency_confidence_flag(row):
+    """Classify a Ruby Data Converter row by how trustworthy its name/ID match is."""
+    sid  = str(row.get("Student ID", "")).strip()
+    conf = pd.to_numeric(row.get("Match Confidence", 0), errors="coerce")
+    conf = 0.0 if pd.isna(conf) else conf
+    if sid in ("", "Unknown / Not Found", "nan", "None"):
+        return "Unmatched"
+    if conf >= RUBY_HIGH_CONF_CUTOFF:
+        return "High"
+    return "Fuzzy \u2013 Review"
+
+
+def load_agency_data(ruby_path):
+    """
+    Load the combined CSV exported by the Ruby Data Converter (Student Report
+    Extractor) and turn it into a clean, one-row-per-student-per-year table of
+    Agency in Learning scores.
+
+    Expected columns: Year, NM Element, Class, School, Rater, Student ID,
+    Email, Match Confidence, Extracted Name, Current Level, Progress in
+    Level, Source File, Page.
+    """
+    raw = pd.read_csv(ruby_path)
+    raw.columns = raw.columns.str.strip()
+
+    required = ["Year", "Student ID", "Email", "Match Confidence",
+                "Current Level", "Progress in Level"]
+    missing = [c for c in required if c not in raw.columns]
+    if missing:
+        raise ValueError(
+            f"Agency in Learning CSV is missing expected column(s): {', '.join(missing)}. "
+            f"Make sure you're uploading the combined CSV exported from the Student "
+            f"Report Extractor (Ruby Data Converter), with the Email column included."
+        )
+
+    if "NM Element" in raw.columns:
+        raw = raw[raw["NM Element"].astype(str).str.contains("Agency in Learning", case=False, na=False)]
+
+    raw["Email"] = raw["Email"].astype(str).str.strip().str.lower()
+    raw = raw[raw["Email"].str.contains("@", na=False)]   # drop blank / unmatched-email rows
+
+    raw["Year"]  = raw["Year"].astype(str).str.strip()
+    raw["Level Num"] = pd.to_numeric(
+        raw["Current Level"].astype(str).str.extract(r"(\d+)")[0], errors="coerce")
+    raw["Progress"] = pd.to_numeric(raw["Progress in Level"], errors="coerce").fillna(0.0)
+    raw["Agency Score"] = raw["Level Num"] + raw["Progress"]
+    raw["Match Confidence"] = pd.to_numeric(raw["Match Confidence"], errors="coerce").fillna(0.0)
+    raw["Confidence Flag"]  = raw.apply(_agency_confidence_flag, axis=1)
+    raw = raw.dropna(subset=["Level Num"])
+
+    # A student can appear more than once per year (multiple scans/pages/elements).
+    # Keep the highest-confidence row per Email+Year; ties broken by keeping the first.
+    raw = raw.sort_values("Match Confidence", ascending=False)
+    raw = raw.drop_duplicates(subset=["Email", "Year"], keep="first")
+    return raw.reset_index(drop=True)
+
+
+def build_agency_df(agency_raw, roster_df):
+    """
+    One row per camp student: this year's (Y8 camp, 2026) Agency in Learning
+    score, last year's (Y7 Maria Camp, 2025) baseline where available, and a
+    cautiously-labelled year-on-year comparison.
+
+    roster_df should be tab1_df (or similar) with First Name / Surname /
+    Email / Class / Location columns already resolved.
+    """
+    cols_keep = ["Email", "Current Level", "Progress in Level", "Agency Score",
+                "NM Element", "Confidence Flag", "Match Confidence", "Extracted Name"]
+    cols_keep = [c for c in cols_keep if c in agency_raw.columns]
+
+    cur  = agency_raw[agency_raw["Year"] == RUBY_CAMP_YEAR][cols_keep].copy()
+    base = agency_raw[agency_raw["Year"] == RUBY_BASELINE_YEAR][cols_keep].copy()
+    cur  = cur.rename(columns={c: f"{c} (Y8 Camp 2026)" for c in cols_keep if c != "Email"})
+    base = base.rename(columns={c: f"{c} (Y7 Maria Camp 2025)" for c in cols_keep if c != "Email"})
+
+    roster_cols = [c for c in ["First Name", "Surname", "Email", "Class", "Location"]
+                  if c in roster_df.columns]
+    roster = roster_df[roster_cols].drop_duplicates(subset=["Email"]).copy()
+    roster["Email"] = roster["Email"].astype(str).str.strip().str.lower()
+
+    df = pd.merge(roster, cur,  on="Email", how="left")
+    df = pd.merge(df,      base, on="Email", how="left")
+
+    has_cur  = df["Agency Score (Y8 Camp 2026)"].notna() if "Agency Score (Y8 Camp 2026)" in df.columns else pd.Series(False, index=df.index)
+    has_base = df["Agency Score (Y7 Maria Camp 2025)"].notna() if "Agency Score (Y7 Maria Camp 2025)" in df.columns else pd.Series(False, index=df.index)
+    both     = has_cur & has_base
+
+    df["Agency Growth (Y7\u2192Y8)"] = np.where(
+        both,
+        df.get("Agency Score (Y8 Camp 2026)", np.nan) - df.get("Agency Score (Y7 Maria Camp 2025)", np.nan),
+        np.nan)
+
+    def _reliability(i):
+        if not has_cur.loc[i]:
+            return "No 2026 (camp) data"
+        if not both.loc[i]:
+            return "No 2025 baseline \u2014 single point-in-time only"
+        flags = {df.at[i, "Confidence Flag (Y8 Camp 2026)"] if "Confidence Flag (Y8 Camp 2026)" in df.columns else None,
+                df.at[i, "Confidence Flag (Y7 Maria Camp 2025)"] if "Confidence Flag (Y7 Maria Camp 2025)" in df.columns else None}
+        if "Unmatched" in flags:
+            return "Unmatched \u2014 exclude from comparison"
+        if "Fuzzy \u2013 Review" in flags:
+            return "Comparison available \u2014 verify name match"
+        return "Comparison available \u2014 different camp/rater & ~1yr apart, interpret cautiously"
+
+    df["Comparison Reliability"] = [_reliability(i) for i in df.index]
+    return df
+
+
+def build_agency_summary(agency_df):
+    """Aggregate stats for the dedicated Agency in Learning section/sheet."""
+    if agency_df is None or agency_df.empty or "Agency Score (Y8 Camp 2026)" not in agency_df.columns:
+        return {}
+    cur_scores = agency_df["Agency Score (Y8 Camp 2026)"].dropna()
+    growth     = agency_df["Agency Growth (Y7\u2192Y8)"].dropna() if "Agency Growth (Y7\u2192Y8)" in agency_df.columns else pd.Series(dtype=float)
+    level_dist = (agency_df["Current Level (Y8 Camp 2026)"].dropna().value_counts().sort_index().to_dict()
+                 if "Current Level (Y8 Camp 2026)" in agency_df.columns else {})
+    conf_dist  = (agency_df["Confidence Flag (Y8 Camp 2026)"].dropna().value_counts().to_dict()
+                 if "Confidence Flag (Y8 Camp 2026)" in agency_df.columns else {})
+    return {
+        "n_2026":         int(len(cur_scores)),
+        "n_both_years":   int(len(growth)),
+        "avg_2026":       round(float(cur_scores.mean()), 2) if len(cur_scores) else None,
+        "level_dist":     level_dist,
+        "confidence_dist": conf_dist,
+        "avg_growth":     round(float(growth.mean()), 2) if len(growth) else None,
+        "pct_grew":       round(len(growth[growth > 0]) / len(growth) * 100, 1) if len(growth) else None,
+    }
 
 def get_metric_category(metric_name):
     """Return the reporting category for a given metric name."""
@@ -854,7 +1018,7 @@ def build_category_summary(avg_df, metrics_processed):
         })
     return pd.DataFrame(rows)
 
-def process_quantitative(students_df, pre_df, post_df):
+def process_quantitative(students_df, pre_df, post_df, ruby_path=None):
     post_emails = post_df["Email address"].dropna().unique()
     students_df = students_df[students_df["Email"].isin(post_emails)]
     merged = pd.merge(students_df[["First name", "Surname", "Email"]], pre_df,
@@ -909,13 +1073,52 @@ def process_quantitative(students_df, pre_df, post_df):
                       "Declined":    len(vd[vd < 0]) / len(vd) if len(vd) else 0})
 
     tab1_df = pd.DataFrame(tab1_data)
+    core_metrics = list(metrics)   # snapshot before Agency (different timeframe) is folded in
+
+    # ── Agency in Learning (Ruby Data Converter) ──────────────────────
+    agency_df, agency_summary = pd.DataFrame(), {}
+    if ruby_path:
+        try:
+            agency_raw = load_agency_data(ruby_path)
+            agency_df  = build_agency_df(agency_raw, tab1_df)
+            agency_summary = build_agency_summary(agency_df)
+
+            growth_map = dict(zip(agency_df["Email"], agency_df["Agency Growth (Y7\u2192Y8)"]))
+            agency_metric_name = "Agency in Learning (Y7\u2192Y8)"
+            tab1_df[agency_metric_name] = tab1_df["Email"].map(growth_map)
+            metrics.append(agency_metric_name)
+
+            gvals = tab1_df[agency_metric_name].dropna()
+            if len(gvals):
+                cur_map  = dict(zip(agency_df["Email"], agency_df.get("Agency Score (Y8 Camp 2026)", pd.Series(dtype=float))))
+                base_map = dict(zip(agency_df["Email"], agency_df.get("Agency Score (Y7 Maria Camp 2025)", pd.Series(dtype=float))))
+                cur_vals  = tab1_df["Email"].map(cur_map).dropna()
+                base_vals = tab1_df["Email"].map(base_map).dropna()
+                avgs.append({
+                    "Metric": agency_metric_name,
+                    "Pre-Camp Avg":  round(float(base_vals.mean()), 2) if len(base_vals) else float("nan"),
+                    "Post-Camp Avg": round(float(cur_vals.mean()), 2) if len(cur_vals) else float("nan"),
+                    "Avg Shift":     float(gvals.mean()),
+                    "Median Shift":  float(gvals.median()),
+                    "% Improvers":   round(len(gvals[gvals > 0]) / len(gvals) * 100, 1) if len(gvals) else 0,
+                })
+                dists.append({
+                    "Metric": agency_metric_name,
+                    "Improved":    len(gvals[gvals > 0]) / len(gvals) if len(gvals) else 0,
+                    "Stayed Same": len(gvals[gvals == 0]) / len(gvals) if len(gvals) else 0,
+                    "Declined":    len(gvals[gvals < 0]) / len(gvals) if len(gvals) else 0,
+                })
+
+        except Exception as e:
+            print(f"Agency in Learning data warning: {e}")
+
     unique_locs    = [l for l in tab1_df["Location"].unique() if str(l).lower() not in ("unknown","nan")]
     unique_classes = [c for c in tab1_df["Class"].unique()    if str(c).lower() not in ("unknown","nan")]
     bd_rows = []
     for cls in sorted(unique_classes):
         sub = tab1_df[tab1_df["Class"] == cls]
         row = {"Class": cls, "Location": "ALL LOCATIONS",
-               "Average Shift (All Areas)": sub[metrics].mean().mean()}
+               "Average Shift (All Areas)": sub[core_metrics].mean().mean()}
         for m in metrics:
             row[m] = sub[m].mean()
         bd_rows.append(row)
@@ -923,13 +1126,18 @@ def process_quantitative(students_df, pre_df, post_df):
             sl = sub[sub["Location"] == loc]
             if not sl.empty:
                 row2 = {"Class": f"  ↳ {loc}", "Location": loc,
-                        "Average Shift (All Areas)": sl[metrics].mean().mean()}
+                        "Average Shift (All Areas)": sl[core_metrics].mean().mean()}
                 for m in metrics:
                     row2[m] = sl[m].mean()
                 bd_rows.append(row2)
 
     post_only_scores = _compute_post_only_scores(post_df, merged)
-    return tab1_df, pd.DataFrame(avgs), pd.DataFrame(dists), pd.DataFrame(bd_rows), merged, metrics, post_only_scores
+    if agency_summary.get("avg_2026") is not None:
+        post_only_scores["Agency in Learning \u2014 2026 Camp Snapshot (all matched students)"] = {
+            "avg": agency_summary["avg_2026"], "n": agency_summary["n_2026"]}
+
+    return (tab1_df, pd.DataFrame(avgs), pd.DataFrame(dists), pd.DataFrame(bd_rows), merged, metrics,
+            post_only_scores, agency_df, agency_summary)
 
 
 def _compute_post_only_scores(post_df, merged):
@@ -974,7 +1182,7 @@ C = {
 def write_excel(output_path, tab1_df, avg_df, dist_df, breakdown_df,
                 coded_df, summary_metadata, long_df, narratives,
                 metrics_processed, mm_tables, qual_charts, post_only_scores=None,
-                na_df=None, na_narratives=None):
+                na_df=None, na_narratives=None, agency_df=None, agency_summary=None):
 
     writer   = pd.ExcelWriter(output_path, engine="xlsxwriter")
     workbook = writer.book
@@ -1137,7 +1345,7 @@ def write_excel(output_path, tab1_df, avg_df, dist_df, breakdown_df,
     ws_exec.set_row(8, 20)
     sec_fmt = workbook.add_format({"bold": True, "font_size": 11, "font_name": "Arial",
                                    "bg_color": C["navy"], "font_color": C["white"]})
-    ws_exec.merge_range("B9:I9", "  📐  Skill & Attitude Shifts by Category  (average change, pre → post camp)", sec_fmt)
+    ws_exec.merge_range("B9:I9", "  📐  Skill & Attitude Shifts by Category  (avg change, pre → post camp; Agency in Learning = Y7 → Y8, see note)", sec_fmt)
 
     # Mini table: metric shifts grouped by category
     if not avg_df.empty and "Metric" in avg_df.columns:
@@ -1972,6 +2180,136 @@ def write_excel(output_path, tab1_df, avg_df, dist_df, breakdown_df,
     else:
         ws_na.write(row_idx, 1, "No non-attender data to display.", F["skip"])
 
+    # ────────────────────────────────────────────────────────────────
+    #  🎯 AGENCY IN LEARNING  (dedicated sheet)
+    # ────────────────────────────────────────────────────────────────
+    if agency_df is not None and not agency_df.empty:
+        ws_ag = workbook.add_worksheet("🎯 Agency in Learning")
+        writer.sheets["🎯 Agency in Learning"] = ws_ag
+        ws_ag.hide_gridlines(2)
+        ws_ag.set_column("A:A", 3)
+        ws_ag.set_column("B:B", 20)
+        ws_ag.set_column("C:C", 14)
+        ws_ag.set_column("D:D", 24)
+        ws_ag.set_column("E:E", 14)
+        ws_ag.set_column("F:F", 24)
+        ws_ag.set_column("G:G", 14)
+        ws_ag.set_column("H:H", 16)
+        ws_ag.set_column("I:I", 40)
+
+        ag_title_fmt = workbook.add_format({
+            "bold": True, "font_size": 18, "font_name": "Arial",
+            "bg_color": "#4338CA", "font_color": C["white"], "align": "center", "valign": "vcenter",
+        })
+        ws_ag.merge_range("B1:I2", "🎯  Agency in Learning", ag_title_fmt)
+        ws_ag.set_row(0, 30); ws_ag.set_row(1, 30)
+        ag_sub_fmt = workbook.add_format({
+            "font_size": 10, "font_name": "Arial", "bg_color": "#6D5BD0",
+            "font_color": C["white"], "align": "center", "valign": "vcenter", "italic": True,
+        })
+        ws_ag.merge_range("B3:I3", AGENCY_DEFINITION, ag_sub_fmt)
+        ws_ag.set_row(2, 18)
+
+        ag_sec_fmt = workbook.add_format({
+            "bold": True, "font_size": 11, "font_name": "Arial",
+            "bg_color": "#4338CA", "font_color": C["white"],
+        })
+        ag_note_fmt = workbook.add_format({
+            "italic": True, "font_size": 9, "font_name": "Arial", "font_color": C["grey"],
+            "text_wrap": True, "valign": "top",
+        })
+        ag_field_fmt = workbook.add_format({
+            "bold": True, "font_size": 10, "font_name": "Arial",
+            "bg_color": "#E0E7FF", "font_color": "#4338CA",
+        })
+
+        r = 4
+        ws_ag.set_row(r, 18)
+        ws_ag.merge_range(r, 1, r, 8, "  ⚠️  Reading this data: Year 2026 = this Y8 camp. Year 2025 = the "
+                                       "same cohort's Y7 Maria Camp, a different camp with a different rater "
+                                       "and ~1 year apart \u2014 treat any year-on-year comparison as indicative, "
+                                       "not definitive. The \u201cClass\u201d field in the source export is not "
+                                       "reliable and is not used for matching (students are matched by email).",
+                          ag_note_fmt)
+        ws_ag.set_row(r, 32)
+        r += 2
+
+        # Level reference table
+        ws_ag.merge_range(r, 1, r, 8, "  📖  The Five Levels of Agency in Learning", ag_sec_fmt)
+        r += 1
+        for lvl in range(1, 6):
+            ws_ag.set_row(r, 34)
+            ws_ag.write(r, 1, f"Level {lvl}", ag_field_fmt)
+            lvl_bg = workbook.add_format({"text_wrap": True, "valign": "vcenter", "font_name": "Arial",
+                                          "font_size": 10, "bg_color": "#F5F4FF" if lvl % 2 else C["white"]})
+            ws_ag.merge_range(r, 2, r, 8, AGENCY_LEVEL_DESCRIPTIONS[lvl], lvl_bg)
+            r += 1
+        r += 1
+
+        # Snapshot stat cards
+        ws_ag.merge_range(r, 1, r, 8, "  📊  2026 Camp Snapshot", ag_sec_fmt)
+        r += 1
+        s = agency_summary or {}
+        ws_ag.set_row(r, 22); ws_ag.set_row(r+1, 32); ws_ag.set_row(r+2, 18)
+        write_stat_card(ws_ag, r, 1, "Students Matched", str(s.get("n_2026", 0)), "Agency score, 2026 camp",
+                        bg="#E0E7FF", font_col="#4338CA")
+        write_stat_card(ws_ag, r, 4, "Avg Level (2026)", str(s.get("avg_2026", "—")), "out of 5.0",
+                        bg="#E0E7FF", font_col="#4338CA")
+        grow_n = s.get("n_both_years", 0)
+        grow_v = s.get("avg_growth", None)
+        write_stat_card(ws_ag, r, 7, "Avg Growth (Y7→Y8)",
+                        f"{grow_v:+.2f}" if grow_v is not None else "—",
+                        f"n={grow_n}, see caution above", bg="#FEF3C7", font_col=C["amber"])
+        r += 4
+
+        # Per-student table
+        ws_ag.merge_range(r, 1, r, 8, "  📋  Student-Level Detail", ag_sec_fmt)
+        r += 1
+        hdr_fmt = workbook.add_format({
+            "bold": True, "bg_color": "#E0E7FF", "font_color": "#4338CA",
+            "font_name": "Arial", "font_size": 10, "border": 1, "text_wrap": True, "align": "center",
+        })
+        headers = ["Name", "Class", "2026 Level", "2026 Confidence", "2025 Level (Y7 Maria Camp)",
+                  "2025 Confidence", "Growth (Y7→Y8)", "Comparison Reliability"]
+        for ci, h in enumerate(headers):
+            ws_ag.write(r, 1 + ci, h, hdr_fmt)
+        r += 1
+
+        conf_fmts = {
+            "High":           workbook.add_format({"bg_color": C["green_light"], "font_color": C["green"], "bold": True, "font_name": "Arial", "font_size": 10, "align": "center"}),
+            "Fuzzy \u2013 Review": workbook.add_format({"bg_color": C["amber_light"], "font_color": C["amber"], "font_name": "Arial", "font_size": 10, "align": "center"}),
+            "Unmatched":      workbook.add_format({"bg_color": C["red_light"], "font_color": C["red"], "font_name": "Arial", "font_size": 10, "align": "center"}),
+        }
+        blank_fmt = workbook.add_format({"font_color": "#BBBBBB", "italic": True, "font_name": "Arial", "font_size": 10, "align": "center"})
+
+        ag_sorted = agency_df.sort_values(
+            by="Agency Score (Y8 Camp 2026)" if "Agency Score (Y8 Camp 2026)" in agency_df.columns else "Email",
+            ascending=False, na_position="last")
+        for i, (_, row_d) in enumerate(ag_sorted.iterrows()):
+            row_bg = C["offwhite"] if i % 2 == 0 else C["white"]
+            base_f = workbook.add_format({"bg_color": row_bg, "font_name": "Arial", "font_size": 10})
+            ctr_f  = workbook.add_format({"bg_color": row_bg, "font_name": "Arial", "font_size": 10, "align": "center"})
+            name = f"{row_d.get('First Name','')} {row_d.get('Surname','')}".strip()
+            ws_ag.write(r, 1, name or "—", base_f)
+            ws_ag.write(r, 2, str(row_d.get("Class", "—")), ctr_f)
+            ws_ag.write(r, 3, str(row_d.get("Current Level (Y8 Camp 2026)", "—")) if pd.notna(row_d.get("Current Level (Y8 Camp 2026)")) else "—", ctr_f)
+            c1 = row_d.get("Confidence Flag (Y8 Camp 2026)")
+            ws_ag.write(r, 4, c1 if pd.notna(c1) else "No data", conf_fmts.get(c1, blank_fmt))
+            ws_ag.write(r, 5, str(row_d.get("Current Level (Y7 Maria Camp 2025)", "—")) if pd.notna(row_d.get("Current Level (Y7 Maria Camp 2025)")) else "—", ctr_f)
+            c2 = row_d.get("Confidence Flag (Y7 Maria Camp 2025)")
+            ws_ag.write(r, 6, c2 if pd.notna(c2) else "No data", conf_fmts.get(c2, blank_fmt))
+            growth_v = row_d.get("Agency Growth (Y7\u2192Y8)")
+            if pd.notna(growth_v):
+                gf = F["g_dec"] if growth_v > 0.05 else (F["r_dec"] if growth_v < -0.05 else F["z_dec"])
+                ws_ag.write(r, 7, growth_v, gf)
+            else:
+                ws_ag.write(r, 7, "—", blank_fmt)
+            ws_ag.write(r, 8, str(row_d.get("Comparison Reliability", "")), workbook.add_format(
+                {"bg_color": row_bg, "font_name": "Arial", "font_size": 9, "italic": True, "text_wrap": True}))
+            r += 1
+
+        ws_ag.freeze_panes(r - len(ag_sorted), 2)
+
     writer.close()
 
 
@@ -2004,7 +2342,8 @@ def _load_chartjs():
 
 def write_html_report(html_path, tab1_df, avg_df, dist_df, breakdown_df,
                       coded_df, narratives, metrics_processed, mm_tables, long_df,
-                      post_only_scores=None, na_df=None, na_narratives=None):
+                      post_only_scores=None, na_df=None, na_narratives=None,
+                      agency_df=None, agency_summary=None):
     """Generate a fully self-contained, offline HTML presentation report."""
     import json as _json
 
@@ -2045,7 +2384,8 @@ def write_html_report(html_path, tab1_df, avg_df, dist_df, breakdown_df,
         cat_avg_shift = float(cat_rows["Avg Shift"].mean())
         cat_pct_imp   = float(cat_rows["% Improvers"].mean()) if "% Improvers" in cat_rows.columns else 0
         cat_colour_cls = {"Activity Skills": "teal", "Camping Skills": "green",
-                          "Attitudes": "amber", "Knowledge": "purple"}.get(cat, "")
+                          "Attitudes": "amber", "Knowledge": "purple",
+                          "Agency in Learning": "indigo"}.get(cat, "")
         cat_summary_cards.append({
             "cat": cat, "icon": CATEGORY_ICONS.get(cat, ""),
             "avg_shift": cat_avg_shift, "pct_imp": cat_pct_imp,
@@ -2080,6 +2420,100 @@ def write_html_report(html_path, tab1_df, avg_df, dist_df, breakdown_df,
             if not cls.startswith("  ↳") and cls not in ("","nan"):
                 class_labels.append(cls.strip())
                 class_shift_vals.append(safe_float(row.get("Average Shift (All Areas)",0)))
+
+    # ── Agency in Learning chart + table data
+    ag_summary = agency_summary or {}
+    ag_level_labels = [f"Level {i}" for i in range(1, 6)]
+    ag_level_dist   = ag_summary.get("level_dist", {})
+    ag_level_counts = []
+    for i in range(1, 6):
+        cnt = 0
+        for k, v in ag_level_dist.items():
+            if str(k).strip().endswith(str(i)):
+                cnt += v
+        ag_level_counts.append(int(cnt))
+
+    ag_growth_labels, ag_growth_vals = [], []
+    ag_table_rows_html = ""
+    if agency_df is not None and not agency_df.empty:
+        ag_sorted = agency_df.sort_values(
+            by="Agency Score (Y8 Camp 2026)" if "Agency Score (Y8 Camp 2026)" in agency_df.columns else "Email",
+            ascending=False, na_position="last")
+        ag_conf_cls = {"High": "pos", "Fuzzy \u2013 Review": "zero", "Unmatched": "neg"}
+        for _, rrow in ag_sorted.iterrows():
+            name = f"{rrow.get('First Name','')} {rrow.get('Surname','')}".strip() or "\u2014"
+            lvl26 = rrow.get("Current Level (Y8 Camp 2026)")
+            lvl26 = lvl26 if pd.notna(lvl26) else "\u2014"
+            lvl25 = rrow.get("Current Level (Y7 Maria Camp 2025)")
+            lvl25 = lvl25 if pd.notna(lvl25) else "\u2014"
+            conf26 = rrow.get("Confidence Flag (Y8 Camp 2026)")
+            conf26 = conf26 if pd.notna(conf26) else "No data"
+            growth = rrow.get("Agency Growth (Y7\u2192Y8)")
+            if pd.notna(growth):
+                ag_growth_labels.append(name)
+                ag_growth_vals.append(round(float(growth), 2))
+                g_str   = f"{growth:+.2f}"
+                g_class = "pos" if growth > 0.05 else ("neg" if growth < -0.05 else "zero")
+            else:
+                g_str, g_class = "\u2014", "zero"
+            conf_class = ag_conf_cls.get(conf26, "zero")
+            reliability = str(rrow.get("Comparison Reliability", ""))
+            ag_table_rows_html += (
+                f"<tr><td>{name}</td><td style='text-align:center'>{lvl26}</td>"
+                f"<td style='text-align:center' class='{conf_class}'>{conf26}</td>"
+                f"<td style='text-align:center'>{lvl25}</td>"
+                f"<td style='text-align:center' class='{g_class}'>{g_str}</td>"
+                f"<td style='font-size:11px;color:#6B7280'>{reliability}</td></tr>"
+            ).replace("'", '"')
+
+    ag_level_desc_html = "".join(
+        f"<div class='ag-level-row'><span class='ag-level-badge'>Level {i}</span>"
+        f"<span class='ag-level-text'>{AGENCY_LEVEL_DESCRIPTIONS[i]}</span></div>"
+        for i in range(1, 6)
+    )
+
+    agency_section_html = ""
+    if agency_df is not None and not agency_df.empty:
+        n_2026 = ag_summary.get("n_2026", 0)
+        avg_2026 = ag_summary.get("avg_2026")
+        n_both = ag_summary.get("n_both_years", 0)
+        avg_growth = ag_summary.get("avg_growth")
+        pct_grew = ag_summary.get("pct_grew")
+        agency_section_html = (
+            "<h2 class=\"section-title\" id=\"agency\" style=\"border-color:#4338CA;color:#4338CA\">"
+            "&#127919; Agency in Learning</h2>"
+            f"<p style='color:#6B7280;margin-bottom:8px;font-size:13px'><em>{AGENCY_DEFINITION}</em></p>"
+            "<div class='ag-warning'>&#9888;&#65039; <strong>Reading this data:</strong> "
+            "2026 = this Y8 camp cohort. 2025 = the same students&rsquo; Y7 Maria Camp baseline &mdash; "
+            "a different camp, different rater, and roughly a year apart. Year-on-year comparisons are "
+            "shown for interest but should be treated as indicative, not definitive. Students are matched "
+            "by email; the source data&rsquo;s &ldquo;Class&rdquo; field is not used because it is unreliable.</div>"
+            "<div class='ag-grid'>"
+            "<div class='ag-levels-card'><h4>The Five Levels</h4>" + ag_level_desc_html + "</div>"
+            "<div class='ag-stats-col'>"
+            "<div class='cards' style='margin-bottom:16px'>"
+            f"<div class='card indigo'><div class='card-val'>{n_2026}</div>"
+            "<div class='card-lbl'>Students matched (2026)</div></div>"
+            f"<div class='card indigo'><div class='card-val'>{avg_2026 if avg_2026 is not None else '\u2014'}</div>"
+            "<div class='card-lbl'>Avg level (2026), out of 5.0</div></div>"
+            f"<div class='card amber'><div class='card-val'>{(f'{avg_growth:+.2f}' if avg_growth is not None else '\u2014')}</div>"
+            f"<div class='card-lbl'>Avg growth Y7&rarr;Y8 (n={n_both})</div>"
+            f"<div class='card-sub'>{(f'{pct_grew:.0f}% grew' if pct_grew is not None else 'No baseline overlap')}</div></div>"
+            "</div>"
+            "<div class='chart-box' style='min-height:240px'><h3>2026 Level Distribution</h3>"
+            "<canvas id='agency-level-chart' style='height:200px'></canvas></div>"
+            "</div></div>"
+            + ("<div class='chart-box' style='min-height:280px;margin-top:16px'>"
+               "<h3>Growth, Y7 Maria Camp &rarr; Y8 Camp (students with both data points)</h3>"
+               "<canvas id='agency-growth-chart' style='height:240px'></canvas></div>"
+               if ag_growth_vals else
+               "<p style='color:#9CA3AF;font-size:12px;margin-top:8px'>No students currently have both a 2025 and 2026 score to compare.</p>")
+            + "<h3 style='margin-top:20px;font-size:15px;color:#1B3A5C'>Student-Level Detail</h3>"
+            "<div class='breakdown-wrap'><table class='breakdown-table' style='white-space:normal'>"
+            "<thead><tr><th>Name</th><th>2026 Level</th><th>2026 Match</th>"
+            "<th>2025 Level (Y7)</th><th>Growth</th><th>Comparison Reliability</th></tr></thead>"
+            f"<tbody>{ag_table_rows_html}</tbody></table></div>"
+        )
 
     # ── Qual chart data (counts per coded value, per field)
     qual_charts_js = {}
@@ -2571,6 +3005,17 @@ body{font-family:'Segoe UI',Arial,sans-serif;background:#F0F4F8;color:#1a2332;fo
 .card.green{border-top-color:#2D7A4F}.card.green .card-val{color:#2D7A4F}
 .card.amber{border-top-color:#D97706}.card.amber .card-val{color:#D97706}
 .card.purple{border-top-color:#5B21B6}.card.purple .card-val{color:#5B21B6}
+.card.indigo{border-top-color:#4338CA}.card.indigo .card-val{color:#4338CA}
+.ag-warning{background:#FEF3C7;border-left:4px solid #D97706;border-radius:6px;padding:10px 14px;font-size:12.5px;color:#92400E;margin-bottom:18px;line-height:1.5}
+.ag-grid{display:grid;grid-template-columns:1.1fr 1fr;gap:20px;align-items:start}
+@media(max-width:900px){.ag-grid{grid-template-columns:1fr}}
+.ag-levels-card{background:white;border-radius:12px;padding:18px 20px;box-shadow:0 1px 4px rgba(0,0,0,.08)}
+.ag-levels-card h4{margin:0 0 10px;color:#4338CA;font-size:13px;text-transform:uppercase;letter-spacing:.04em}
+.ag-level-row{display:flex;gap:10px;align-items:flex-start;padding:7px 0;border-bottom:1px solid #F0F0F0}
+.ag-level-row:last-child{border-bottom:none}
+.ag-level-badge{flex:0 0 auto;background:#E0E7FF;color:#4338CA;font-weight:700;font-size:11px;padding:3px 8px;border-radius:6px}
+.ag-level-text{font-size:12.5px;color:#374151;line-height:1.45}
+.ag-stats-col{display:flex;flex-direction:column;gap:0}
 .card.teal{border-top-color:#2E8B88}.card.teal .card-val{color:#2E8B88}
 .po-row td{background:#D4F0EF!important;font-style:italic}
 .metric-table{width:100%;border-collapse:collapse;background:white;border-radius:10px;overflow:hidden;box-shadow:0 1px 4px rgba(0,0,0,.08);margin-bottom:24px}
@@ -2650,6 +3095,7 @@ blockquote.na-quote{background:#F5F3FF;border-left-color:#7C3AED}
     <a href="#classes">By Class</a>
     <a href="#qualitative">Student Voice</a>
     <a href="#mixed">Insights</a>
+    <a href="#agency">Agency in Learning</a>
     <a href="#non-attenders">Non-Attenders</a>
   </div>
 </nav>
@@ -2742,6 +3188,8 @@ blockquote.na-quote{background:#F5F3FF;border-left-color:#7C3AED}
   </p>
   <div class="mm-grid">""" + mm_html + """</div>
 
+  """ + agency_section_html + """
+
   <h2 class="section-title" id="non-attenders" style="border-color:#7C3AED;color:#7C3AED">
     &#128683; Non-Attender Analysis
   </h2>
@@ -2833,6 +3281,45 @@ new Chart(document.getElementById('class-chart'),{
   }
 });
 
+const agLevelEl=document.getElementById('agency-level-chart');
+if(agLevelEl){
+  new Chart(agLevelEl,{
+    type:'bar',
+    data:{
+      labels:""" + _json.dumps(ag_level_labels) + """,
+      datasets:[{label:'Students',data:""" + _json.dumps(ag_level_counts) + """,
+        backgroundColor:'#4338CA',borderRadius:4}]
+    },
+    options:{responsive:true,maintainAspectRatio:false,
+      plugins:{legend:{display:false},tooltip:{callbacks:{label:c=>` ${c.parsed.y} student(s)`}}},
+      scales:{
+        y:{beginAtZero:true,ticks:{precision:0,font:TICK_FONT},grid:{color:'#F0F0F0'}},
+        x:{grid:{display:false},ticks:{font:TICK_FONT}}
+      }
+    }
+  });
+}
+
+const agGrowthEl=document.getElementById('agency-growth-chart');
+if(agGrowthEl){
+  const gVals=""" + _json.dumps(ag_growth_vals) + """;
+  new Chart(agGrowthEl,{
+    type:'bar',
+    data:{
+      labels:""" + _json.dumps(ag_growth_labels) + """,
+      datasets:[{label:'Growth',data:gVals,
+        backgroundColor:gVals.map(v=>v>0?'#2D7A4F':v<0?'#C0392B':'#D3D3D3'),borderRadius:3}]
+    },
+    options:{indexAxis:'y',responsive:true,maintainAspectRatio:false,
+      plugins:{legend:{display:false},tooltip:{callbacks:{label:c=>` ${c.parsed.x>=0?'+':''}${c.parsed.x.toFixed(2)} levels`}}},
+      scales:{
+        x:{title:{display:true,text:'Change in Agency score (2026 minus 2025)',font:TICK_FONT},grid:{color:'#F0F0F0'},ticks:{font:TICK_FONT}},
+        y:{grid:{display:false},ticks:{font:{size:10}}}
+      }
+    }
+  });
+}
+
 const qualData=""" + qual_js + """;
 const fieldCanvas={
 """ + field_canvas_map_js + """};
@@ -2864,7 +3351,7 @@ Object.entries(qualData).forEach(([field,d])=>{
     print(f"HTML report written: {html_path}")
 
 
-def generate_report(student_path, pre_path, post_path, status_label, root):
+def generate_report(student_path, pre_path, post_path, status_label, root, ruby_path=None):
     try:
         status_label.config(text="Status: Loading & Purging Data…", fg="blue"); root.update()
         students = pd.read_csv(student_path)
@@ -2887,8 +3374,8 @@ def generate_report(student_path, pre_path, post_path, status_label, root):
         post_df = post_df.sort_values("Timestamp").drop_duplicates("Email address", keep="last")
 
         status_label.config(text="Status: Processing quantitative data…", fg="blue"); root.update()
-        tab1_df, avg_df, dist_df, breakdown_df, merged_df, metrics_processed, post_only_scores = process_quantitative(
-            students, pre_df, post_df)
+        tab1_df, avg_df, dist_df, breakdown_df, merged_df, metrics_processed, post_only_scores, agency_df, agency_summary = process_quantitative(
+            students, pre_df, post_df, ruby_path=ruby_path)
 
         status_label.config(text="Status: Loading AI Model…", fg="#D97706"); root.update()
         year = datetime.now().year
@@ -2942,14 +3429,16 @@ def generate_report(student_path, pre_path, post_path, status_label, root):
         write_excel(xl_path, tab1_df, avg_df, dist_df, breakdown_df,
                     coded_df, summary_metadata, long_df, narratives,
                     metrics_processed, mm_tables, qual_charts, post_only_scores,
-                    na_df=na_df, na_narratives=na_narratives)
+                    na_df=na_df, na_narratives=na_narratives,
+                    agency_df=agency_df, agency_summary=agency_summary)
 
         status_label.config(text="Status: Writing HTML Report…", fg="blue"); root.update()
         html_path = os.path.join(docs_dir, "Camp_Report_Presentation.html")
         write_html_report(html_path, tab1_df, avg_df, dist_df, breakdown_df,
                           coded_df, narratives, metrics_processed, mm_tables, long_df,
                           post_only_scores,
-                          na_df=na_df, na_narratives=na_narratives)
+                          na_df=na_df, na_narratives=na_narratives,
+                          agency_df=agency_df, agency_summary=agency_summary)
 
         status_label.config(text="Status: Complete ✓", fg="#006100")
         messagebox.showinfo("Done",
@@ -2970,7 +3459,7 @@ def setup_gui():
     root.resizable(False, False)
     root.configure(bg="#F8FAFC")
 
-    files = {"student": "", "pre": "", "post": ""}
+    files = {"student": "", "pre": "", "post": "", "ruby": ""}
 
     def pick(key, entry):
         p = filedialog.askopenfilename(filetypes=[("CSV", "*.csv")])
@@ -3006,6 +3495,8 @@ def setup_gui():
     row("1.  Student List CSV", "student", "Roster with name & email columns")
     row("2.  Pre-Camp Survey CSV", "pre",     "Google Forms export, before camp")
     row("3.  Post-Camp Survey CSV", "post",   "Google Forms export, after camp")
+    row("4.  Agency in Learning CSV (optional)", "ruby",
+        "Combined CSV from the Student Report Extractor (Ruby Data Converter), incl. Email column")
 
     tk.Frame(root, height=1, bg="#E5E7EB").pack(fill="x", padx=30, pady=14)
 
@@ -3019,7 +3510,8 @@ def setup_gui():
               activebackground="#2E8B88", activeforeground="white",
               relief="flat", pady=10,
               command=lambda: generate_report(
-                  files["student"], files["pre"], files["post"], status, root)
+                  files["student"], files["pre"], files["post"], status, root,
+                  ruby_path=files["ruby"] or None)
               ).pack(pady=4, fill="x", padx=30)
 
     tk.Label(root, text="Generates: ~/Documents/Camp_Analysis_Report.xlsx  +  Camp_Report_Presentation.html",
