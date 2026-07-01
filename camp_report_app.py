@@ -2520,9 +2520,10 @@ def write_html_report(html_path, tab1_df, avg_df, dist_df, breakdown_df,
             "<div class='chart-box' style='height:260px'><h3>2026 Level Distribution</h3>"
             "<canvas id='agency-level-chart' style='height:200px;width:100%;display:block'></canvas></div>"
             "</div></div>"
-            + (f"<div class='chart-box' style='height:{max(300, len(ag_growth_vals)*26+80)}px;margin-top:16px'>"
+            + (f"<div class='chart-box' style='height:{min(460, max(280, len(ag_growth_vals)*24+60))}px;margin-top:16px'>"
                "<h3>Growth, Y7 Maria Camp &rarr; Y8 Camp (students with both data points)</h3>"
-               f"<canvas id='agency-growth-chart' style='height:{max(240, len(ag_growth_vals)*26)}px;width:100%;display:block'></canvas></div>"
+               f"<div style='overflow-y:auto;height:{min(400, max(220, len(ag_growth_vals)*24))}px'>"
+               f"<canvas id='agency-growth-chart' style='height:{max(220, len(ag_growth_vals)*24)}px;width:100%;display:block'></canvas></div></div>"
                if ag_growth_vals else
                "<p style='color:#9CA3AF;font-size:12px;margin-top:8px'>No students currently have both a 2025 and 2026 score to compare.</p>")
 
@@ -2713,8 +2714,8 @@ def write_html_report(html_path, tab1_df, avg_df, dist_df, breakdown_df,
     chart_declined  = [declined_vals[i] for i in chart_filter]
     chart_shift_cols = [("#2D7A4F" if v > 0.05 else "#C0392B" if v < -0.05 else "#9CA3AF")
                         for v in chart_shift]
-    # Dynamic canvas height: 36px per metric, minimum 280px
-    chart_h = max(280, len(chart_labels) * 36)
+    # Dynamic canvas height: 28px per metric, hard-capped at 480px
+    chart_h = min(480, max(240, len(chart_labels) * 28))
 
     # ── Build qual sections HTML
     qual_section_html = ""
@@ -3049,9 +3050,9 @@ body{font-family:'Segoe UI',Arial,sans-serif;background:#F0F4F8;color:#1a2332;fo
 .zero{color:#6B7280}.zero .shift-bar,.shift-bar.zero{background:#D3D3D3}
 .amber{color:#D97706}
 .chart-grid{display:grid;grid-template-columns:1fr 1fr;gap:24px;margin-bottom:24px}
-.chart-box{background:white;border-radius:12px;padding:24px;box-shadow:0 1px 4px rgba(0,0,0,.08);display:flex;flex-direction:column}
-.chart-box h3{font-size:15px;font-weight:700;color:#1B3A5C;margin-bottom:16px;flex-shrink:0}
-.chart-box canvas{flex:1;min-height:0}
+.chart-box{background:white;border-radius:12px;padding:20px 24px 16px;box-shadow:0 1px 4px rgba(0,0,0,.08);overflow:hidden}
+.chart-box h3{font-size:15px;font-weight:700;color:#1B3A5C;margin:0 0 12px}
+.chart-box canvas{display:block;width:100%;height:100%}
 .abcult-banner{background:linear-gradient(135deg,#EDE9FE,#DDD6FE);border-left:4px solid #5B21B6;padding:16px 24px;margin:0}
 .abcult-title{font-size:13px;font-weight:700;color:#5B21B6;text-transform:uppercase;letter-spacing:.05em;margin-bottom:12px}
 .abcult-stats{display:flex;gap:24px;flex-wrap:wrap}
@@ -3168,24 +3169,24 @@ blockquote.na-quote{background:#F5F3FF;border-left-color:#7C3AED}
   </table>
 
   <div class="chart-grid">
-    <div class="chart-box" style="min-height:""" + str(chart_h + 80) + """px">
+    <div class="chart-box" style="height:""" + str(chart_h + 64) + """px">
       <h3>Score Shift by Skill (post &#8722; pre)</h3>
-      <canvas id="shift-chart" style="height:""" + str(chart_h) + """px"></canvas>
+      <canvas id="shift-chart" style="height:""" + str(chart_h) + """px;width:100%;display:block"></canvas>
     </div>
-    <div class="chart-box" style="min-height:""" + str(chart_h + 80) + """px">
+    <div class="chart-box" style="height:""" + str(chart_h + 64) + """px">
       <h3>Who Improved, Stayed Same, or Declined?</h3>
-      <canvas id="dist-chart" style="height:""" + str(chart_h) + """px"></canvas>
+      <canvas id="dist-chart" style="height:""" + str(chart_h) + """px;width:100%;display:block"></canvas>
     </div>
   </div>
 
   <div class="chart-grid">
-    <div class="chart-box" style="min-height:""" + str(chart_h + 80) + """px">
+    <div class="chart-box" style="height:""" + str(chart_h + 64) + """px">
       <h3>Pre-Camp vs Post-Camp Average Scores</h3>
-      <canvas id="prepost-chart" style="height:""" + str(chart_h) + """px"></canvas>
+      <canvas id="prepost-chart" style="height:""" + str(chart_h) + """px;width:100%;display:block"></canvas>
     </div>
-    <div class="chart-box">
+    <div class="chart-box" style="height:300px">
       <h3>Average Shift by Class</h3>
-      <canvas id="class-chart"></canvas>
+      <canvas id="class-chart" style="height:240px;width:100%;display:block"></canvas>
     </div>
   </div>
 
