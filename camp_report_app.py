@@ -3075,7 +3075,7 @@ body{font-family:'Segoe UI',Arial,sans-serif;background:#F0F4F8;color:#1a2332;fo
 .quotes-block{margin-top:16px;border-top:2px solid #E5E7EB;padding-top:16px}
 blockquote.quote-item{background:#F0F9FF;border-left:4px solid #2E8B88;padding:10px 14px;margin-bottom:10px;border-radius:0 8px 8px 0;font-style:italic;color:#1B3A5C;font-size:13.5px;line-height:1.6}
 .qual-charts{display:flex;flex-direction:column;gap:14px;border-left:1px solid #F0F0F0;padding-left:20px;min-width:0}
-.field-chart-wrap{background:#F9FAFB;border-radius:8px;padding:12px;position:relative}
+.field-chart-wrap{background:#F9FAFB;border-radius:8px;padding:12px;position:relative;height:190px;overflow:hidden}
 .field-chart-title{font-size:10px;font-weight:700;color:#6B7280;text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px}
 .no-chart{color:#9CA3AF;font-size:12px;font-style:italic;padding:12px}
 .mm-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(340px,1fr));gap:20px}
@@ -3479,7 +3479,8 @@ def setup_gui():
     root = tk.Tk()
     root.title("Camp Analysis Tool")
     root.geometry("620x500")
-    root.resizable(False, False)
+    root.resizable(True, True)
+    root.minsize(560, 400)
     root.configure(bg="#F8FAFC")
 
     # 'clam' is a cross-platform ttk theme that actually honours custom
@@ -3551,6 +3552,13 @@ def setup_gui():
              font=("Arial", 8), fg="#9CA3AF", bg="#F8FAFC").pack(pady=(4,0))
     tk.Label(root, text="⚡ Fully offline — place chartjs.min.js in the same folder for offline charts",
              font=("Arial", 8), fg="#2E8B88", bg="#F8FAFC").pack(pady=(0,6))
+
+    # Auto-fit the window to its actual content height so the Generate
+    # button is never cut off (e.g. due to OS font scaling), while still
+    # letting the user resize the window manually if they want to.
+    root.update_idletasks()
+    needed_h = root.winfo_reqheight() + 10
+    root.geometry(f"620x{max(500, needed_h)}")
 
     root.mainloop()
 
