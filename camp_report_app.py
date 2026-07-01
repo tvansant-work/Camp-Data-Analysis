@@ -810,7 +810,7 @@ METRIC_CATEGORIES = {
     "Camping Skills":  ["Camping Skills", "Sleeping Outdoors"],
     "Attitudes":       ["Teamwork", "Autonomy", "Drive"],
     "Knowledge":       ["Aboriginal Culture"],
-    "Agency in Learning": ["Agency in Learning (Y7\u2192Y8)"],
+    "Agency in Learning": ["Agency in Learning (Y7\u2192Y8, 1\u201310)"],
 }
 CATEGORY_ORDER = ["Activity Skills", "Camping Skills", "Attitudes", "Knowledge", "Agency in Learning"]
 CATEGORY_COLOURS = {
@@ -911,7 +911,12 @@ def load_agency_data(ruby_path):
     raw["Level Num"] = pd.to_numeric(
         raw["Current Level"].astype(str).str.extract(r"(\d+)")[0], errors="coerce")
     raw["Progress"] = pd.to_numeric(raw["Progress in Level"], errors="coerce").fillna(0.0)
-    raw["Agency Score"] = raw["Level Num"] + raw["Progress"]
+    # Convert to a 1-10 scale so Agency in Learning aligns with the rest of the
+    # survey data (which is also out of 10).  Each level spans 2 points:
+    #   Level 1 → 1–2  |  Level 2 → 3–4  |  Level 3 → 5–6
+    #   Level 4 → 7–8  |  Level 5 → 9–10
+    # Formula: (Level - 1) × 2 + 1 + Progress  (Progress is 0.0–1.0)
+    raw["Agency Score"] = (raw["Level Num"] - 1) * 2 + 1 + raw["Progress"]
     raw["Match Confidence"] = pd.to_numeric(raw["Match Confidence"], errors="coerce").fillna(0.0)
     raw["Confidence Flag"]  = raw.apply(_agency_confidence_flag, axis=1)
     raw = raw.dropna(subset=["Level Num"])
@@ -1084,7 +1089,7 @@ def process_quantitative(students_df, pre_df, post_df, ruby_path=None):
             agency_summary = build_agency_summary(agency_df)
 
             growth_map = dict(zip(agency_df["Email"], agency_df["Agency Growth (Y7\u2192Y8)"]))
-            agency_metric_name = "Agency in Learning (Y7\u2192Y8)"
+            agency_metric_name = "Agency in Learning (Y7\u2192Y8, 1\u201310)"
             tab1_df[agency_metric_name] = tab1_df["Email"].map(growth_map)
             metrics.append(agency_metric_name)
 
@@ -2207,7 +2212,10 @@ def write_excel(output_path, tab1_df, avg_df, dist_df, breakdown_df,
             "font_size": 10, "font_name": "Arial", "bg_color": "#6D5BD0",
             "font_color": C["white"], "align": "center", "valign": "vcenter", "italic": True,
         })
-        ws_ag.merge_range("B3:I3", AGENCY_DEFINITION, ag_sub_fmt)
+        ws_ag.merge_range("B3:I3",
+            f"{AGENCY_DEFINITION}  |  Scored 1–10 to align with camp survey data "
+            "(each level spans 2 pts: L1=1–2, L2=3–4, L3=5–6, L4=7–8, L5=9–10)",
+            ag_sub_fmt)
         ws_ag.set_row(2, 18)
 
         ag_sec_fmt = workbook.add_format({
@@ -2239,7 +2247,7 @@ def write_excel(output_path, tab1_df, avg_df, dist_df, breakdown_df,
         r += 1
         for lvl in range(1, 6):
             ws_ag.set_row(r, 34)
-            ws_ag.write(r, 1, f"Level {lvl}", ag_field_fmt)
+            ws_ag.write(r, 1, f"Level {lvl}  (score {lvl*2-1}–{lvl*2}/10)", ag_field_fmt)
             lvl_bg = workbook.add_format({"text_wrap": True, "valign": "vcenter", "font_name": "Arial",
                                           "font_size": 10, "bg_color": "#F5F4FF" if lvl % 2 else C["white"]})
             ws_ag.merge_range(r, 2, r, 8, AGENCY_LEVEL_DESCRIPTIONS[lvl], lvl_bg)
@@ -2253,7 +2261,7 @@ def write_excel(output_path, tab1_df, avg_df, dist_df, breakdown_df,
         ws_ag.set_row(r, 22); ws_ag.set_row(r+1, 32); ws_ag.set_row(r+2, 18)
         write_stat_card(ws_ag, r, 1, "Students Matched", str(s.get("n_2026", 0)), "Agency score, 2026 camp",
                         bg="#E0E7FF", font_col="#4338CA")
-        write_stat_card(ws_ag, r, 4, "Avg Level (2026)", str(s.get("avg_2026", "—")), "out of 5.0",
+        write_stat_card(ws_ag, r, 4, "Avg Score (2026)", str(s.get("avg_2026", "—")), "out of 10",
                         bg="#E0E7FF", font_col="#4338CA")
         grow_n = s.get("n_both_years", 0)
         grow_v = s.get("avg_growth", None)
@@ -2423,7 +2431,8 @@ def write_html_report(html_path, tab1_df, avg_df, dist_df, breakdown_df,
 
     # ── Agency in Learning chart + table data
     ag_summary = agency_summary or {}
-    ag_level_labels = [f"Level {i}" for i in range(1, 6)]
+    # Level labels show both the level number and its 1-10 score band
+    ag_level_labels = [f"L{i} ({i*2-1}–{i*2})" for i in range(1, 6)]
     ag_level_dist   = ag_summary.get("level_dist", {})
     ag_level_counts = []
     for i in range(1, 6):
@@ -2467,7 +2476,9 @@ def write_html_report(html_path, tab1_df, avg_df, dist_df, breakdown_df,
             ).replace("'", '"')
 
     ag_level_desc_html = "".join(
-        f"<div class='ag-level-row'><span class='ag-level-badge'>Level {i}</span>"
+        f"<div class='ag-level-row'>"
+        f"<span class='ag-level-badge'>Level {i}<br><span style='font-weight:400;font-size:10px'>"
+        f"score {i*2-1}\u2013{i*2}</span></span>"
         f"<span class='ag-level-text'>{AGENCY_LEVEL_DESCRIPTIONS[i]}</span></div>"
         for i in range(1, 6)
     )
@@ -2483,6 +2494,12 @@ def write_html_report(html_path, tab1_df, avg_df, dist_df, breakdown_df,
             "<h2 class=\"section-title\" id=\"agency\" style=\"border-color:#4338CA;color:#4338CA\">"
             "&#127919; Agency in Learning</h2>"
             f"<p style='color:#6B7280;margin-bottom:8px;font-size:13px'><em>{AGENCY_DEFINITION}</em></p>"
+            "<p style='color:#6B7280;margin-bottom:12px;font-size:12.5px'>"
+            "Scored on a <strong>1–10 scale</strong> to align with other camp survey metrics. "
+            "Each of the 5 descriptor levels spans 2 points: Level&nbsp;1&nbsp;=&nbsp;1\u20132, "
+            "Level&nbsp;2&nbsp;=&nbsp;3\u20134, Level&nbsp;3&nbsp;=&nbsp;5\u20136, "
+            "Level&nbsp;4&nbsp;=&nbsp;7\u20138, Level&nbsp;5&nbsp;=&nbsp;9\u201310. "
+            "The full level descriptors are shown in the table below.</p>"
             "<div class='ag-warning'>&#9888;&#65039; <strong>Reading this data:</strong> "
             "2026 = this Y8 camp cohort. 2025 = the same students&rsquo; Y7 Maria Camp baseline &mdash; "
             "a different camp, different rater, and roughly a year apart. Year-on-year comparisons are "
@@ -2495,19 +2512,20 @@ def write_html_report(html_path, tab1_df, avg_df, dist_df, breakdown_df,
             f"<div class='card indigo'><div class='card-val'>{n_2026}</div>"
             "<div class='card-lbl'>Students matched (2026)</div></div>"
             f"<div class='card indigo'><div class='card-val'>{avg_2026 if avg_2026 is not None else '\u2014'}</div>"
-            "<div class='card-lbl'>Avg level (2026), out of 5.0</div></div>"
+            "<div class='card-lbl'>Avg score (2026), out of 10</div></div>"
             f"<div class='card amber'><div class='card-val'>{(f'{avg_growth:+.2f}' if avg_growth is not None else '\u2014')}</div>"
             f"<div class='card-lbl'>Avg growth Y7&rarr;Y8 (n={n_both})</div>"
             f"<div class='card-sub'>{(f'{pct_grew:.0f}% grew' if pct_grew is not None else 'No baseline overlap')}</div></div>"
             "</div>"
-            "<div class='chart-box' style='min-height:240px'><h3>2026 Level Distribution</h3>"
-            "<canvas id='agency-level-chart' style='height:200px'></canvas></div>"
+            "<div class='chart-box' style='height:260px'><h3>2026 Level Distribution</h3>"
+            "<canvas id='agency-level-chart' style='height:200px;width:100%;display:block'></canvas></div>"
             "</div></div>"
-            + ("<div class='chart-box' style='min-height:280px;margin-top:16px'>"
+            + (f"<div class='chart-box' style='height:{max(300, len(ag_growth_vals)*26+80)}px;margin-top:16px'>"
                "<h3>Growth, Y7 Maria Camp &rarr; Y8 Camp (students with both data points)</h3>"
-               "<canvas id='agency-growth-chart' style='height:240px'></canvas></div>"
+               f"<canvas id='agency-growth-chart' style='height:{max(240, len(ag_growth_vals)*26)}px;width:100%;display:block'></canvas></div>"
                if ag_growth_vals else
                "<p style='color:#9CA3AF;font-size:12px;margin-top:8px'>No students currently have both a 2025 and 2026 score to compare.</p>")
+
             + "<h3 style='margin-top:20px;font-size:15px;color:#1B3A5C'>Student-Level Detail</h3>"
             "<div class='breakdown-wrap'><table class='breakdown-table' style='white-space:normal'>"
             "<thead><tr><th>Name</th><th>2026 Level</th><th>2026 Match</th>"
@@ -3293,7 +3311,8 @@ if(agLevelEl){
     options:{responsive:true,maintainAspectRatio:false,
       plugins:{legend:{display:false},tooltip:{callbacks:{label:c=>` ${c.parsed.y} student(s)`}}},
       scales:{
-        y:{beginAtZero:true,ticks:{precision:0,font:TICK_FONT},grid:{color:'#F0F0F0'}},
+        y:{beginAtZero:true,ticks:{precision:0,font:TICK_FONT},grid:{color:'#F0F0F0'},
+           title:{display:true,text:'Students',font:TICK_FONT}},
         x:{grid:{display:false},ticks:{font:TICK_FONT}}
       }
     }
@@ -3311,9 +3330,12 @@ if(agGrowthEl){
         backgroundColor:gVals.map(v=>v>0?'#2D7A4F':v<0?'#C0392B':'#D3D3D3'),borderRadius:3}]
     },
     options:{indexAxis:'y',responsive:true,maintainAspectRatio:false,
-      plugins:{legend:{display:false},tooltip:{callbacks:{label:c=>` ${c.parsed.x>=0?'+':''}${c.parsed.x.toFixed(2)} levels`}}},
+      plugins:{legend:{display:false},tooltip:{callbacks:{label:c=>{
+        const v=c.parsed.x;return ` ${v>=0?'+':''}${v.toFixed(2)} pts (on 10-pt scale)`;
+      }}}},
       scales:{
-        x:{title:{display:true,text:'Change in Agency score (2026 minus 2025)',font:TICK_FONT},grid:{color:'#F0F0F0'},ticks:{font:TICK_FONT}},
+        x:{title:{display:true,text:'Change in Agency score (1–10 scale)',font:TICK_FONT},
+           grid:{color:'#F0F0F0'},ticks:{font:TICK_FONT}},
         y:{grid:{display:false},ticks:{font:{size:10}}}
       }
     }
